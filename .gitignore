@@ -1,0 +1,15 @@
+.env
+data/raw/
+data/adjusted/
+data/derived/
+reports/
+*.pyc
+__pycache__/
+.venv/
+*.egg-info/
+.pytest_cache/
+notebooks/.ipynb_checkpoints/
+*.duckdb
+*.db
+.DS_Store
+Thumbs.db
