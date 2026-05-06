@@ -1,0 +1,16 @@
+commission_per_trade: 0.005
+market_impact_model: linear
+impact_coefficient: 10.0
+
+# Spread assumptions (conservative, Phase 1) in basis points (bps).
+spread_bps:
+  # Category defaults used when an instrument has no explicit entry:
+  __default_g10_fx_spot__: 1.5
+  __default_treasury_etf__: 2.0
+  __default_large_cap_equity__: 5.0
+
+  # Explicit instruments (can override category defaults):
+  TLT: 2.0
+  IEF: 2.0
+  SHY: 2.0
+
