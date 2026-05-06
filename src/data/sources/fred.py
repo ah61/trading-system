@@ -111,7 +111,6 @@ class FREDSource(DataSource):
         This avoids lookahead bias for macro series that are revised.
         """
         try:
-            _ = self._fred.get_series_vintage_dates(ticker)
             series = self._fred.get_series_as_of_date(ticker, as_of_date)
         except Exception as e:
             raise DataFetchError(
@@ -120,6 +119,14 @@ class FREDSource(DataSource):
 
         if series is None:
             raise DataFetchError(f"FRED vintage series not found: {ticker!r}")
+
+        if isinstance(series, pd.DataFrame):
+            if "value" not in series.columns or "date" not in series.columns:
+                raise DataFetchError(
+                    f"Unexpected FRED vintage format for {ticker!r}: expected 'date' and 'value' columns."
+                )
+            # Set date as index, take last value per date (most recent vintage as of as_of_date)
+            series = series.set_index("date")["value"].groupby(level=0).last()
 
         df = self._series_to_frame(series)
         df = df.loc[

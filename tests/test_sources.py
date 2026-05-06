@@ -63,8 +63,14 @@ def test_fred_fetch_vintage_uses_as_of_date_and_schema(monkeypatch: pytest.Monke
     monkeypatch.setenv("FRED_API_KEY", "test-key")
 
     mock_fred = MagicMock()
-    mock_fred.get_series_vintage_dates.return_value = [pd.Timestamp("2024-01-15")]
-    mock_fred.get_series_as_of_date.return_value = _mock_fred_series(10, start="2024-01-01")
+    mock_df = pd.DataFrame(
+        {
+            "realtime_start": [pd.Timestamp("2015-03-01")],
+            "date": [pd.Timestamp("2024-01-15")],
+            "value": [10.0],
+        }
+    )
+    mock_fred.get_series_as_of_date.return_value = mock_df
 
     with patch("src.data.sources.fred.Fred", autospec=False) as FredCls:
         FredCls.return_value = mock_fred
@@ -76,8 +82,7 @@ def test_fred_fetch_vintage_uses_as_of_date_and_schema(monkeypatch: pytest.Monke
             as_of_date=date(2024, 1, 15),
         )
 
-    mock_fred.get_series_vintage_dates.assert_called_once_with("CPIAUCSL")
-    mock_fred.get_series_as_of_date.assert_called_once()
+    mock_fred.get_series_as_of_date.assert_called_once_with("CPIAUCSL", date(2024, 1, 15))
 
     assert isinstance(df.index, pd.DatetimeIndex)
     assert df.index.tz is not None
