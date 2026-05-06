@@ -1,0 +1,1 @@
+﻿import pathlib; raw = pathlib.Path(".env").read_bytes(); text = raw.decode("utf-16"); pathlib.Path(".env").write_text(text, encoding="utf-8"); print("Done:", repr(pathlib.Path(".env").read_text(encoding="utf-8")[:100]))
