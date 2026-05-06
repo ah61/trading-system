@@ -1,0 +1,4 @@
+target_vol: 0.10
+vol_window: 60
+kelly_fraction: 0.5
+
