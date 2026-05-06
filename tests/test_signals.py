@@ -286,3 +286,142 @@ def test_rates_trend_signal_positive_in_uptrend(monkeypatch: pytest.MonkeyPatch)
     out = sig.compute(data).dropna()
     assert float(out.iloc[-1]) > 0.0
 
+
+def test_equity_momentum_compute_returns_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.equities.momentum import EquityMomentumSignal
+
+    tickers = [f"T{i}" for i in range(10)]
+    cfg = {
+        "signal": {
+            "name": "equity_momentum",
+            "asset_class": "equities",
+            "signal_type": "momentum",
+            "frequency": "monthly",
+        },
+        "parameters": {
+            "formation_months": 12,
+            "skip_months": 1,
+            "universe": "sp500_current",
+            "rebalance_freq": "monthly",
+        },
+    }
+    monkeypatch.setattr(EquityMomentumSignal, "_load_config", classmethod(lambda cls, _: cfg))
+    monkeypatch.setattr(EquityMomentumSignal, "_load_universe_tickers", classmethod(lambda cls, _: tickers))
+
+    idx = pd.date_range("2022-01-03", periods=600, freq="B", tz="UTC")
+    data: Dict[str, pd.DataFrame] = {}
+    for i, tkr in enumerate(tickers):
+        close = np.linspace(100.0, 150.0 + i, len(idx), dtype=np.float64)
+        data[tkr] = pd.DataFrame({"close": close}, index=idx)
+
+    sig = EquityMomentumSignal()
+    out = sig.compute(data).dropna()
+
+    assert isinstance(out, pd.Series)
+    assert out.index.nlevels == 2
+    assert (out >= -1.0).all()
+    assert (out <= 1.0).all()
+
+
+def test_equity_momentum_no_lookahead(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.equities.momentum import EquityMomentumSignal
+
+    tickers = [f"T{i}" for i in range(10)]
+    cfg = {
+        "signal": {
+            "name": "equity_momentum",
+            "asset_class": "equities",
+            "signal_type": "momentum",
+            "frequency": "monthly",
+        },
+        "parameters": {
+            "formation_months": 12,
+            "skip_months": 1,
+            "universe": "sp500_current",
+            "rebalance_freq": "monthly",
+        },
+    }
+    monkeypatch.setattr(EquityMomentumSignal, "_load_config", classmethod(lambda cls, _: cfg))
+    monkeypatch.setattr(EquityMomentumSignal, "_load_universe_tickers", classmethod(lambda cls, _: tickers))
+
+    idx = pd.date_range("2022-01-03", periods=650, freq="B", tz="UTC")
+    base: Dict[str, pd.DataFrame] = {}
+    for i, tkr in enumerate(tickers):
+        close = np.linspace(100.0, 160.0 + i, len(idx), dtype=np.float64)
+        base[tkr] = pd.DataFrame({"close": close}, index=idx)
+
+    perturbed = {k: v.copy() for k, v in base.items()}
+
+    sig = EquityMomentumSignal()
+    out_base = sig.compute(base)
+    out_perturbed = sig.compute(perturbed)
+
+    # Choose a rebalance date and perturb the next business day (t+1) for one stock.
+    t = out_base.index.get_level_values(0).unique().sort_values()[15]
+    t_plus_1 = (t + pd.tseries.offsets.BDay(1)).to_pydatetime()
+    t_plus_1 = pd.Timestamp(t_plus_1)
+    perturbed[tickers[0]].loc[t_plus_1, "close"] += np.float64(9999.0)
+
+    out_perturbed2 = sig.compute(perturbed)
+    assert out_base.xs(t, level=0).equals(out_perturbed2.xs(t, level=0))
+
+
+def test_equity_momentum_metadata_survivorship_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.equities.momentum import EquityMomentumSignal
+
+    tickers = ["A", "B"]
+    cfg = {
+        "signal": {
+            "name": "equity_momentum",
+            "asset_class": "equities",
+            "signal_type": "momentum",
+            "frequency": "monthly",
+        },
+        "parameters": {"formation_months": 12, "skip_months": 1, "universe": "sp500_current", "rebalance_freq": "monthly"},
+    }
+    monkeypatch.setattr(EquityMomentumSignal, "_load_config", classmethod(lambda cls, _: cfg))
+    monkeypatch.setattr(EquityMomentumSignal, "_load_universe_tickers", classmethod(lambda cls, _: tickers))
+
+    sig = EquityMomentumSignal()
+    meta = sig.get_metadata()
+    assert meta.get("survivorship_biased") is True
+
+
+def test_equity_momentum_winners_positive_losers_negative(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.equities.momentum import EquityMomentumSignal
+
+    tickers = ["A", "B"] + [f"X{i}" for i in range(8)]
+    cfg = {
+        "signal": {
+            "name": "equity_momentum",
+            "asset_class": "equities",
+            "signal_type": "momentum",
+            "frequency": "monthly",
+        },
+        "parameters": {
+            "formation_months": 12,
+            "skip_months": 1,
+            "universe": "sp500_current",
+            "rebalance_freq": "monthly",
+        },
+    }
+    monkeypatch.setattr(EquityMomentumSignal, "_load_config", classmethod(lambda cls, _: cfg))
+    monkeypatch.setattr(EquityMomentumSignal, "_load_universe_tickers", classmethod(lambda cls, _: tickers))
+
+    idx = pd.date_range("2022-01-03", periods=650, freq="B", tz="UTC")
+    data: Dict[str, pd.DataFrame] = {}
+
+    # A clearly outperforms; B clearly underperforms; others roughly flat.
+    data["A"] = pd.DataFrame({"close": np.linspace(100.0, 250.0, len(idx), dtype=np.float64)}, index=idx)
+    data["B"] = pd.DataFrame({"close": np.linspace(200.0, 80.0, len(idx), dtype=np.float64)}, index=idx)
+    for tkr in tickers[2:]:
+        data[tkr] = pd.DataFrame({"close": np.linspace(100.0, 105.0, len(idx), dtype=np.float64)}, index=idx)
+
+    sig = EquityMomentumSignal()
+    out = sig.compute(data).dropna()
+
+    last_date = out.index.get_level_values(0).unique().sort_values()[-1]
+    cs = out.xs(last_date, level=0)
+    assert float(cs.loc["A"]) > 0.0
+    assert float(cs.loc["B"]) < 0.0
+

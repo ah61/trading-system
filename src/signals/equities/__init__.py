@@ -1,0 +1,2 @@
+"""Equities signals package."""
+
