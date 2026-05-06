@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from src.portfolio.costs import CostModel
+from src.portfolio.constructor import PortfolioConstructor
 from src.portfolio.sizing import PositionSizer
 
 
@@ -116,4 +117,108 @@ def test_vol_target_respects_sign() -> None:
 
     assert float(w.iloc[-1]["A"]) < 0.0
     assert float(w.iloc[-1]["B"]) > 0.0
+
+
+def test_construct_returns_weights_and_trades() -> None:
+    idx = pd.date_range("2020-01-01", periods=20, freq="D")
+    prices = _synthetic_prices(idx)
+    signals = pd.DataFrame({"A": [0.6] * len(idx), "B": [-0.4] * len(idx)}, index=idx)
+    asset_classes = {"A": "equity", "B": "equity"}
+
+    pc = PortfolioConstructor(position_sizer=PositionSizer(vol_window=5))
+    weights, trades = pc.construct(
+        signals=signals,
+        prices=prices,
+        asset_classes=asset_classes,
+        sizing_method="vol_target",
+        target_vol=0.10,
+    )
+
+    assert isinstance(weights, pd.DataFrame)
+    assert isinstance(trades, pd.DataFrame)
+    assert weights.shape == signals.shape
+    assert trades.shape == signals.shape
+    assert list(weights.columns) == list(signals.columns)
+    assert weights.index.equals(signals.index)
+    assert trades.index.equals(signals.index)
+
+
+def test_gross_limit_enforced() -> None:
+    idx = pd.date_range("2020-01-01", periods=20, freq="D")
+    prices = _synthetic_prices(idx)
+    signals = pd.DataFrame({"A": [1.0] * len(idx), "B": [1.0] * len(idx)}, index=idx)
+    asset_classes = {"A": "equity", "B": "equity"}
+
+    pc = PortfolioConstructor(position_sizer=PositionSizer(vol_window=5))
+    weights, _ = pc.construct(
+        signals=signals,
+        prices=prices,
+        asset_classes=asset_classes,
+        sizing_method="vol_target",
+        target_vol=0.10,
+        gross_limit=1.0,
+        net_limit=10.0,
+    )
+
+    gross = weights.abs().sum(axis=1)
+    assert bool((gross <= 1.0 + 1e-12).all())
+
+
+def test_net_limit_enforced() -> None:
+    idx = pd.date_range("2020-01-01", periods=20, freq="D")
+    prices = _synthetic_prices(idx)
+    signals = pd.DataFrame({"A": [1.0] * len(idx), "B": [1.0] * len(idx)}, index=idx)
+    asset_classes = {"A": "equity", "B": "equity"}
+
+    pc = PortfolioConstructor(position_sizer=PositionSizer(vol_window=5))
+    weights, _ = pc.construct(
+        signals=signals,
+        prices=prices,
+        asset_classes=asset_classes,
+        sizing_method="vol_target",
+        target_vol=0.10,
+        gross_limit=10.0,
+        net_limit=0.1,
+    )
+
+    net = weights.sum(axis=1).abs()
+    assert bool((net <= 0.1 + 1e-10).all())
+
+
+def test_trades_are_weight_differences() -> None:
+    idx = pd.date_range("2020-01-01", periods=20, freq="D")
+    prices = _synthetic_prices(idx)
+    signals = pd.DataFrame({"A": [0.8] * len(idx), "B": [-0.2] * len(idx)}, index=idx)
+    asset_classes = {"A": "equity", "B": "equity"}
+
+    pc = PortfolioConstructor(position_sizer=PositionSizer(vol_window=5))
+    weights, trades = pc.construct(
+        signals=signals,
+        prices=prices,
+        asset_classes=asset_classes,
+        sizing_method="vol_target",
+        target_vol=0.10,
+    )
+
+    diff = weights.diff().fillna(0.0)
+    diff.iloc[0] = weights.iloc[0]
+    pd.testing.assert_frame_equal(trades, diff)
+
+
+def test_first_row_trades_equal_weights() -> None:
+    idx = pd.date_range("2020-01-01", periods=20, freq="D")
+    prices = _synthetic_prices(idx)
+    signals = pd.DataFrame({"A": [0.3] * len(idx), "B": [0.3] * len(idx)}, index=idx)
+    asset_classes = {"A": "equity", "B": "equity"}
+
+    pc = PortfolioConstructor(position_sizer=PositionSizer(vol_window=5))
+    weights, trades = pc.construct(
+        signals=signals,
+        prices=prices,
+        asset_classes=asset_classes,
+        sizing_method="vol_target",
+        target_vol=0.10,
+    )
+
+    pd.testing.assert_series_equal(trades.iloc[0], weights.iloc[0])
 
