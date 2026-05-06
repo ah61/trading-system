@@ -69,3 +69,116 @@ def test_normalise_unknown_method_raises() -> None:
     with pytest.raises(ValueError):
         _ = sig.normalise(raw, method="nope")
 
+
+def test_fx_carry_compute_returns_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.fx.carry import FXCarrySignal
+
+    cfg = {
+        "signal": {
+            "name": "fx_carry",
+            "asset_class": "fx",
+            "signal_type": "carry",
+            "frequency": "daily",
+        },
+        "parameters": {
+            "rate_series": {"USD": "DFF", "EUR": "EURIBOR3M", "GBP": "GBPRATE3M"},
+            "lookback_smooth": 1,
+            "n_long": 2,
+            "n_short": 2,
+        },
+        "data_requirements": ["DFF", "EURIBOR3M", "GBPRATE3M"],
+        "known_limitations": ["a", "b"],
+    }
+    monkeypatch.setattr(FXCarrySignal, "_load_config", classmethod(lambda cls, _: cfg))
+
+    idx = pd.date_range("2024-01-01", periods=6, freq="B", tz="UTC")
+    data: Dict[str, pd.DataFrame] = {
+        "DFF": pd.DataFrame({"close": np.linspace(5.0, 5.5, len(idx), dtype=np.float64)}, index=idx),
+        "EURIBOR3M": pd.DataFrame(
+            {"close": np.linspace(3.0, 3.2, len(idx), dtype=np.float64)}, index=idx
+        ),
+        "GBPRATE3M": pd.DataFrame(
+            {"close": np.linspace(4.0, 4.1, len(idx), dtype=np.float64)}, index=idx
+        ),
+    }
+
+    sig = FXCarrySignal()
+    out = sig.compute(data)
+
+    assert isinstance(out, pd.Series)
+    assert out.dtype == float
+    assert out.index.nlevels == 2
+    assert (out.dropna() >= -1.0).all()
+    assert (out.dropna() <= 1.0).all()
+
+
+def test_fx_carry_no_lookahead(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.fx.carry import FXCarrySignal
+
+    cfg = {
+        "signal": {
+            "name": "fx_carry",
+            "asset_class": "fx",
+            "signal_type": "carry",
+            "frequency": "daily",
+        },
+        "parameters": {
+            "rate_series": {"USD": "DFF", "EUR": "EURIBOR3M", "GBP": "GBPRATE3M"},
+            "lookback_smooth": 1,
+            "n_long": 2,
+            "n_short": 2,
+        },
+        "data_requirements": ["DFF", "EURIBOR3M", "GBPRATE3M"],
+        "known_limitations": ["a"],
+    }
+    monkeypatch.setattr(FXCarrySignal, "_load_config", classmethod(lambda cls, _: cfg))
+
+    idx = pd.date_range("2024-01-01", periods=8, freq="B", tz="UTC")
+    base = {
+        "DFF": pd.DataFrame({"close": np.linspace(5.0, 5.7, len(idx), dtype=np.float64)}, index=idx),
+        "EURIBOR3M": pd.DataFrame(
+            {"close": np.linspace(3.0, 3.1, len(idx), dtype=np.float64)}, index=idx
+        ),
+        "GBPRATE3M": pd.DataFrame(
+            {"close": np.linspace(4.0, 4.3, len(idx), dtype=np.float64)}, index=idx
+        ),
+    }
+    perturbed = {k: v.copy() for k, v in base.items()}
+
+    # Perturb at t+1 only.
+    t = idx[4]
+    t_plus_1 = idx[5]
+    perturbed["EURIBOR3M"].loc[t_plus_1, "close"] += np.float64(10.0)
+
+    sig = FXCarrySignal()
+    out_base = sig.compute(base)
+    out_perturbed = sig.compute(perturbed)
+
+    assert out_base.xs(t, level=0).equals(out_perturbed.xs(t, level=0))
+
+
+def test_fx_carry_metadata_has_limitations(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.fx.carry import FXCarrySignal
+
+    limitations = [
+        "Rate differential proxies forward premium — approximation only",
+        "Does not include actual FX rollover costs",
+    ]
+    cfg = {
+        "signal": {
+            "name": "fx_carry",
+            "asset_class": "fx",
+            "signal_type": "carry",
+            "frequency": "daily",
+        },
+        "parameters": {"rate_series": {"USD": "DFF", "EUR": "EURIBOR3M"}, "lookback_smooth": 1},
+        "data_requirements": ["DFF", "EURIBOR3M"],
+        "known_limitations": limitations,
+    }
+    monkeypatch.setattr(FXCarrySignal, "_load_config", classmethod(lambda cls, _: cfg))
+
+    sig = FXCarrySignal()
+    meta = sig.get_metadata()
+    assert "known_limitations" in meta
+    assert meta["known_limitations"] == limitations
+

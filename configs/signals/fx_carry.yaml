@@ -1,0 +1,22 @@
+signal:
+  name: fx_carry
+  asset_class: fx
+  signal_type: carry
+  frequency: daily
+parameters:
+  # Currency -> FRED series ID
+  rate_series:
+    USD: DFF
+    EUR: EURIBOR3M
+    GBP: GBPRATE3M
+  lookback_smooth: 1
+  n_long: 3
+  n_short: 3
+data_requirements:
+  - DFF
+  - EURIBOR3M
+  - GBPRATE3M
+known_limitations:
+  - "Rate differential proxies forward premium — approximation only"
+  - "Does not include actual FX rollover costs"
+
