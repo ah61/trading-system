@@ -182,3 +182,107 @@ def test_fx_carry_metadata_has_limitations(monkeypatch: pytest.MonkeyPatch) -> N
     assert "known_limitations" in meta
     assert meta["known_limitations"] == limitations
 
+
+def test_rates_trend_compute_returns_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.rates.trend import RatesTrendSignal
+
+    cfg = {
+        "signal": {
+            "name": "rates_trend",
+            "asset_class": "rates",
+            "signal_type": "trend",
+            "frequency": "daily",
+        },
+        "parameters": {"ticker": "TLT", "fast_window": 50, "slow_window": 200, "scale_by_distance": False},
+    }
+    monkeypatch.setattr(RatesTrendSignal, "_load_config", classmethod(lambda cls, _: cfg))
+
+    idx = pd.date_range("2024-01-01", periods=300, freq="B", tz="UTC")
+    close = np.linspace(100.0, 120.0, len(idx), dtype=np.float64)
+    data: Dict[str, pd.DataFrame] = {"TLT": pd.DataFrame({"close": close}, index=idx)}
+
+    sig = RatesTrendSignal()
+    out = sig.compute(data).dropna()
+
+    assert isinstance(out, pd.Series)
+    assert out.index.tz is not None
+    assert str(out.index.tz) in ("UTC", "UTC+00:00")
+    assert (out >= -1.0).all()
+    assert (out <= 1.0).all()
+
+
+def test_rates_trend_no_lookahead(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.rates.trend import RatesTrendSignal
+
+    cfg = {
+        "signal": {
+            "name": "rates_trend",
+            "asset_class": "rates",
+            "signal_type": "trend",
+            "frequency": "daily",
+        },
+        "parameters": {"ticker": "TLT", "fast_window": 50, "slow_window": 200, "scale_by_distance": True},
+    }
+    monkeypatch.setattr(RatesTrendSignal, "_load_config", classmethod(lambda cls, _: cfg))
+
+    idx = pd.date_range("2024-01-01", periods=320, freq="B", tz="UTC")
+    close = np.linspace(100.0, 130.0, len(idx), dtype=np.float64)
+    base: Dict[str, pd.DataFrame] = {"TLT": pd.DataFrame({"close": close}, index=idx)}
+    perturbed: Dict[str, pd.DataFrame] = {"TLT": base["TLT"].copy()}
+
+    t = idx[250]
+    t_plus_1 = idx[251]
+    perturbed["TLT"].loc[t_plus_1, "close"] += np.float64(500.0)
+
+    sig = RatesTrendSignal()
+    out_base = sig.compute(base)
+    out_perturbed = sig.compute(perturbed)
+
+    assert float(out_base.loc[t]) == float(out_perturbed.loc[t])
+
+
+def test_rates_trend_signal_negative_in_downtrend(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.rates.trend import RatesTrendSignal
+
+    cfg = {
+        "signal": {
+            "name": "rates_trend",
+            "asset_class": "rates",
+            "signal_type": "trend",
+            "frequency": "daily",
+        },
+        "parameters": {"ticker": "TLT", "fast_window": 50, "slow_window": 200, "scale_by_distance": False},
+    }
+    monkeypatch.setattr(RatesTrendSignal, "_load_config", classmethod(lambda cls, _: cfg))
+
+    idx = pd.date_range("2024-01-01", periods=300, freq="B", tz="UTC")
+    close = np.linspace(120.0, 100.0, len(idx), dtype=np.float64)
+    data: Dict[str, pd.DataFrame] = {"TLT": pd.DataFrame({"close": close}, index=idx)}
+
+    sig = RatesTrendSignal()
+    out = sig.compute(data).dropna()
+    assert float(out.iloc[-1]) < 0.0
+
+
+def test_rates_trend_signal_positive_in_uptrend(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.signals.rates.trend import RatesTrendSignal
+
+    cfg = {
+        "signal": {
+            "name": "rates_trend",
+            "asset_class": "rates",
+            "signal_type": "trend",
+            "frequency": "daily",
+        },
+        "parameters": {"ticker": "TLT", "fast_window": 50, "slow_window": 200, "scale_by_distance": False},
+    }
+    monkeypatch.setattr(RatesTrendSignal, "_load_config", classmethod(lambda cls, _: cfg))
+
+    idx = pd.date_range("2024-01-01", periods=300, freq="B", tz="UTC")
+    close = np.linspace(100.0, 120.0, len(idx), dtype=np.float64)
+    data: Dict[str, pd.DataFrame] = {"TLT": pd.DataFrame({"close": close}, index=idx)}
+
+    sig = RatesTrendSignal()
+    out = sig.compute(data).dropna()
+    assert float(out.iloc[-1]) > 0.0
+

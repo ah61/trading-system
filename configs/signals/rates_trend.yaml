@@ -1,0 +1,11 @@
+signal:
+  name: rates_trend
+  asset_class: rates
+  signal_type: trend
+  frequency: daily
+parameters:
+  ticker: TLT
+  fast_window: 50
+  slow_window: 200
+  scale_by_distance: false
+

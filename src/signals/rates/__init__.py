@@ -1,0 +1,2 @@
+"""Rates signals package."""
+
