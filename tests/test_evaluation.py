@@ -4,6 +4,12 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation.signal_evaluator import SignalEvaluator
+from src.evaluation.corrections import (
+    SPAResult,
+    deflated_sharpe_ratio,
+    hansens_spa_test,
+    probability_of_backtest_overfitting,
+)
 
 
 def _panel_series(dates: pd.DatetimeIndex, assets: list[str], values: np.ndarray) -> pd.Series:
@@ -38,7 +44,7 @@ def test_ic_mean_near_zero_for_random_signal() -> None:
     signal = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     fwd = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     horizon = 5
-    log_returns = fwd.unstack().shift(horizon + 1).stack(dropna=False)
+    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=False, dropna=False)
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
@@ -55,7 +61,7 @@ def test_icir_computed_correctly() -> None:
     signal = _panel_series(dates, assets, signal_vals)
     fwd = _panel_series(dates, assets, signal_vals + noise)
     horizon = 1
-    log_returns = fwd.unstack().shift(horizon + 1).stack(dropna=False)
+    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=False, dropna=False)
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
@@ -102,7 +108,7 @@ def test_n_observations_correct() -> None:
 
     fwd = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     horizon = 5
-    log_returns = fwd.unstack().shift(horizon + 1).stack(dropna=False)
+    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=False, dropna=False)
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
@@ -110,4 +116,97 @@ def test_n_observations_correct() -> None:
     # After applying shift(-(h+1)), the last (h+1) dates per asset are NaN.
     expected = (len(dates) - (horizon + 1)) * len(assets)
     assert m.n_observations == expected
+
+
+def test_dsr_perfect_signal_high() -> None:
+    dsr = deflated_sharpe_ratio(
+        observed_sharpe=3.0,
+        n_trials=1,
+        n_observations=252,
+        skewness=0.0,
+        kurtosis=3.0,
+    )
+    assert 0.99 <= dsr <= 1.0
+
+
+def test_dsr_low_sharpe_many_trials() -> None:
+    dsr = deflated_sharpe_ratio(
+        observed_sharpe=0.2,
+        n_trials=1000,
+        n_observations=252,
+        skewness=0.0,
+        kurtosis=3.0,
+    )
+    assert 0.0 <= dsr <= 0.05
+
+
+def test_pbo_returns_float_between_zero_and_one() -> None:
+    rng = np.random.default_rng(10)
+    rm = pd.DataFrame(rng.normal(scale=0.01, size=(320, 8)))
+    pbo = probability_of_backtest_overfitting(rm, n_partitions=16)
+    assert 0.0 <= pbo <= 1.0
+
+
+def test_pbo_overfit_strategy_high_pbo() -> None:
+    # Construct two configs that alternate regime dominance by partition:
+    # whichever config wins in-sample loses out-of-sample for every split.
+    rng = np.random.default_rng(11)
+    n_partitions = 16
+    rows_per_partition = 10
+    n = n_partitions * rows_per_partition
+
+    r0 = np.empty(n, dtype=float)
+    r1 = np.empty(n, dtype=float)
+    for p in range(n_partitions):
+        start = p * rows_per_partition
+        end = start + rows_per_partition
+        if p % 2 == 0:
+            r0[start:end] = 0.01
+            r1[start:end] = -0.01
+        else:
+            r0[start:end] = -0.01
+            r1[start:end] = 0.01
+
+    # Add tiny noise so Sharpe is well-defined.
+    r0 = r0 + rng.normal(scale=1e-4, size=n)
+    r1 = r1 + rng.normal(scale=1e-4, size=n)
+
+    rm = pd.DataFrame({"cfg0": r0, "cfg1": r1})
+    pbo = probability_of_backtest_overfitting(rm, n_partitions=n_partitions)
+    assert pbo > 0.5
+
+
+def test_spa_returns_spa_result() -> None:
+    rng = np.random.default_rng(12)
+    n = 250
+    bench = pd.Series(rng.normal(scale=0.01, size=n))
+    strat = pd.DataFrame(
+        {
+            "s0": rng.normal(scale=0.01, size=n),
+            "s1": rng.normal(scale=0.01, size=n),
+            "s2": rng.normal(scale=0.01, size=n),
+        }
+    )
+    res = hansens_spa_test(bench, strat, n_bootstrap=200, significance=0.05)
+    assert isinstance(res, SPAResult)
+    assert hasattr(res, "p_value")
+    assert hasattr(res, "reject_null")
+    assert hasattr(res, "best_strategy_idx")
+    assert 0.0 <= res.p_value <= 1.0
+
+
+def test_spa_best_strategy_beats_benchmark() -> None:
+    rng = np.random.default_rng(13)
+    n = 300
+    bench = pd.Series(np.zeros(n, dtype=float))
+    strat = pd.DataFrame(
+        {
+            "winner": 0.001 + rng.normal(scale=0.0002, size=n),
+            "flat": rng.normal(scale=0.0002, size=n),
+            "loser": -0.001 + rng.normal(scale=0.0002, size=n),
+        }
+    )
+    res = hansens_spa_test(bench, strat, n_bootstrap=300, significance=0.05)
+    assert res.best_strategy_idx == 0
+    assert res.reject_null is True
 
