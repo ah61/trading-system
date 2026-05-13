@@ -7,18 +7,17 @@
 
 ## Current Status
 **Phase:** 4 complete, pre-Phase 5 signal evaluation in progress
-**Tests:** 71 passing
-**Next action:** Run full signal evaluation (Rates Trend first, then FX Carry, Equity Momentum)
+**Tests:** 72 passing
+**Next action:** Run FX Carry signal evaluation
 
 ---
 
 ## Completed Phases
 
-### Phase 0 — Environment Setup ✅
+### Phase 0 — Environment Setup
 - Repo created, venv, .gitignore, directory structure
-- Tag: (no tag, initial commit)
 
-### Phase 1 — Data Pipeline ✅
+### Phase 1 — Data Pipeline
 - Milestone 1.1: DataStore (DuckDB) — 4 tests
 - Milestone 1.2: FREDSource + Alfred vintage — 4 tests
 - Milestone 1.3: YahooSource — 4 tests
@@ -26,9 +25,9 @@
 - Tag: phase1-complete
 - Fix: fetch_vintage DataFrame parsing (fredapi returns DataFrame not Series)
 - Fix: YahooSource MultiIndex columns (yfinance v0.2+ returns MultiIndex)
-- Verified: vintage CPI data differs from revised by 1.77 points ✅
+- Verified: vintage CPI data differs from revised by 1.77 points
 
-### Phase 2 — Signal Engine ✅
+### Phase 2 — Signal Engine
 - Milestone 2.1: Signal base class + SignalMetrics — 5 tests
 - Milestone 2.2: FXCarrySignal — 3 tests
 - Milestone 2.3: RatesTrendSignal — 4 tests
@@ -37,18 +36,18 @@
 - Milestone 2.6: Corrections (DSR, PBO, Hansen SPA) — 6 tests
 - Tag: phase2-complete
 
-### Phase 3 — Portfolio Engine ✅
+### Phase 3 — Portfolio Engine
 - Milestone 3.1: CostModel — 5 tests
 - Milestone 3.2: PositionSizer (vol target, risk parity) — 4 tests
 - Milestone 3.3: PortfolioConstructor (gross/net limits, trades) — 5 tests
 - Tag: phase3-complete
 
-### Phase 4 — Backtest Engine ✅
+### Phase 4 — Backtest Engine
 - Milestone 4.1: BacktestEngine + WalkForwardEngine — 5 tests
 - Milestone 4.2: CPCVEngine — 4 tests
 - Milestone 4.3: TearsheetGenerator — 3 tests
 - Tag: phase4-complete
-- End-to-end validation on real data ✅
+- End-to-end validation on real data
 - Rates Trend on TLT (2010-2024): Sharpe -0.52 OOS — expected, 2022-2023 rates shock
 - Tag: phase4-validated
 
@@ -57,8 +56,8 @@
 ## In Progress
 
 ### Pre-Phase 5 — Signal Evaluation
-- [ ] Run SignalEvaluator on Rates Trend signal (TLT, 2010-2024)
-- [ ] Apply DSR, PBO, Hansen SPA to Rates Trend
+- [x] Run SignalEvaluator on Rates Trend signal (TLT, 2010-2024)
+- [x] Apply DSR, PBO, Hansen SPA to Rates Trend
 - [ ] Run SignalEvaluator on FX Carry signal
 - [ ] Apply DSR, PBO, Hansen SPA to FX Carry
 - [ ] Run SignalEvaluator on Equity Momentum signal
@@ -77,10 +76,30 @@
 
 ---
 
-## Signal Evaluation Results (to be filled in)
+## Signal Evaluation Results
 
-| Signal | IC Mean | ICIR | DSR | PBO | Decision |
-|--------|---------|------|-----|-----|----------|
-| Rates Trend | TBD | TBD | TBD | TBD | TBD |
-| FX Carry | TBD | TBD | TBD | TBD | TBD |
-| Equity Momentum | TBD | TBD | TBD | TBD | TBD |
+| Signal | Best Horizon | IC Mean | ICIR | Hit Rate | Sharpe | DSR | PBO | Decision |
+|--------|-------------|---------|------|----------|--------|-----|-----|----------|
+| Rates Trend | 1d | 0.0117 | 0.1121 | 0.5120 | 0.2202 | 0.0000 | N/A | FAIL |
+| FX Carry | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Equity Momentum | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+PBO not applicable for single-config signals — requires 2+ parameter configurations.
+
+### Rates Trend — Full Results (TLT, 2010-2024)
+| Horizon | IC | ICIR | Hit Rate | Sharpe |
+|---------|-----|------|----------|--------|
+| 1d | 0.0117 | 0.1121 | 0.5120 | 0.2202 |
+| 5d | 0.0076 | 0.0700 | 0.5109 | 0.1399 |
+| 21d | 0.0126 | 0.1282 | 0.5094 | 0.1677 |
+| 63d | -0.0041 | -0.0340 | 0.5074 | -0.1245 |
+
+Decision: FAIL — IC_mean < 0.02 and ICIR < 0.3 at all horizons per roadmap threshold.
+DSR = 0.0 — right at boundary, not robustly passing.
+Note: 2022-2023 rates shock likely hurt this signal significantly in the OOS period.
+
+### FX Carry — Full Results
+TBD
+
+### Equity Momentum — Full Results
+TBD
