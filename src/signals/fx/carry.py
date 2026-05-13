@@ -114,12 +114,14 @@ class FXCarrySignal(Signal):
 
     @staticmethod
     def _series_from_df(df: pd.DataFrame) -> pd.Series:
-        if "value" in df.columns:
+        if "close" in df.columns:
+            s = df["close"]
+        elif "value" in df.columns:
             s = df["value"]
         elif df.shape[1] == 1:
             s = df.iloc[:, 0]
         else:
-            raise KeyError("Rate DataFrame must have a 'value' column or be single-column.")
+            raise KeyError("Rate DataFrame must have a 'close' or 'value' column.")
         s = s.astype(float)
         s.index = pd.to_datetime(s.index, utc=True)
         return s.sort_index()

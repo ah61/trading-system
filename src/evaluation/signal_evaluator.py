@@ -238,6 +238,14 @@ class SignalEvaluator:
         if signal.index.nlevels == 1:
             return self._evaluate_single_asset(signal, forward_returns, horizon)
 
+        # Multi-asset signal paired with a date-indexed forward-return series:
+        # collapse the (date, asset) panel to a per-date mean signal and run the
+        # single-asset evaluation against the aligned forward-return series.
+        if forward_returns.index.nlevels == 1:
+            unstacked = signal.unstack()
+            mean_signal = unstacked.mean(axis=1).sort_index()
+            return self._evaluate_single_asset(mean_signal, forward_returns, horizon)
+
         # Multi-asset path. Support both call patterns:
         # - caller provides forward returns already (use as-is), or
         # - caller provides 1-day log returns (apply convention shift)
