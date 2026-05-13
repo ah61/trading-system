@@ -238,17 +238,11 @@ class SignalEvaluator:
         if signal.index.nlevels == 1:
             return self._evaluate_single_asset(signal, forward_returns, horizon)
 
-        # Multi-asset signal paired with a date-indexed forward-return series:
-        # collapse the (date, asset) panel to a per-date mean signal and run the
-        # single-asset evaluation against the aligned forward-return series.
-        if forward_returns.index.nlevels == 1:
-            unstacked = signal.unstack()
-            mean_signal = unstacked.mean(axis=1).sort_index()
-            return self._evaluate_single_asset(mean_signal, forward_returns, horizon)
-
-        # Multi-asset path. Support both call patterns:
-        # - caller provides forward returns already (use as-is), or
-        # - caller provides 1-day log returns (apply convention shift)
+        # Multi-asset path. ``signal`` and ``forward_returns`` are both MultiIndex
+        # (date, asset) Series. The forward-return shift is applied per asset (via the
+        # convention helper). Two callers exist in practice: those passing 1-day log
+        # returns (need the internal shift) and those passing already-aligned forward
+        # returns (no further shift); pick whichever yields the larger aligned panel.
         fwd_as_is = forward_returns
         fwd_shifted = self._apply_forward_return_convention(forward_returns, horizon)
 
@@ -260,13 +254,21 @@ class SignalEvaluator:
         paired = pd.concat({"signal": signal, "fwd": fwd}, axis=1).dropna()
         n_obs = int(len(paired))
 
+        # Cross-sectional IC: one Spearman rank-correlation per date across assets.
         ic = self._ic_by_date(signal, fwd)
         ic_mean = float(np.nanmean(ic.to_numpy(dtype=float))) if len(ic) else float("nan")
         ic_std = float(np.nanstd(ic.to_numpy(dtype=float), ddof=1)) if len(ic) else float("nan")
         icir = float(ic_mean / ic_std) if np.isfinite(ic_mean) and np.isfinite(ic_std) and ic_std != 0 else float("nan")
         ic_pos = float(np.nanmean((ic > 0.0).to_numpy(dtype=float))) if len(ic) else float("nan")
 
-        hit_rate = self._hit_rate_by_date(signal, fwd)
+        # hit_rate: global fraction of (date, asset) pairs whose signs match.
+        if n_obs > 0:
+            sig_arr = paired["signal"].to_numpy(dtype=float)
+            fwd_arr = paired["fwd"].to_numpy(dtype=float)
+            hit_rate = float(np.mean(np.sign(sig_arr) == np.sign(fwd_arr)))
+        else:
+            hit_rate = float("nan")
+
         sharpe = self._signal_sharpe(signal, fwd)
         turnover = self._turnover(signal)
         halflife = self._decay_halflife(ic)
