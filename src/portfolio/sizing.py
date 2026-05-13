@@ -163,14 +163,25 @@ class PositionSizer:
     def _realised_vol(prices: pd.DataFrame, window: int) -> pd.DataFrame:
         if window <= 1:
             raise ValueError("vol_window must be > 1.")
-        prices_f = prices.astype(float)
+        if isinstance(prices, pd.DataFrame) and "close" in prices.columns:
+            prices_f = prices["close"].astype(float)
+        else:
+            prices_f = prices.astype(float)
 
         # Use log returns per CONVENTIONS.md: log(prices).diff()
-        log_prices = prices_f.apply(lambda col: col.map(lambda v: log(v) if pd.notna(v) else float("nan")))
+        if isinstance(prices_f, pd.Series):
+            log_prices = prices_f.map(lambda v: log(v) if pd.notna(v) else float("nan"))
+        else:
+            log_prices = prices_f.apply(
+                lambda col: col.map(lambda v: log(v) if pd.notna(v) else float("nan"))
+            )
         log_returns = log_prices.diff()
 
         vol_raw = log_returns.rolling(window=window, min_periods=window).std() * sqrt(252.0)
-        return vol_raw.ffill()
+        out = vol_raw.ffill()
+        if isinstance(out, pd.Series):
+            return out.to_frame(name=out.name if out.name is not None else "close")
+        return out
 
     @staticmethod
     def _scale_to_target_vol(weights: pd.DataFrame, vol: pd.DataFrame, target_vol: float) -> pd.DataFrame:

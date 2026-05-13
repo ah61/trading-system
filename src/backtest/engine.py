@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -26,6 +27,32 @@ def _as_utc_index(idx: pd.Index) -> pd.DatetimeIndex:
 
 def _utc_timestamp(d: date) -> pd.Timestamp:
     return pd.Timestamp(d, tz="UTC")
+
+
+def _normalise_test_timestamps(
+    test_dates: Sequence[date | pd.Timestamp],
+    calendar: pd.DatetimeIndex,
+) -> pd.DatetimeIndex:
+    """Convert user ``test_dates`` to a sorted UTC ``DatetimeIndex`` contained in ``calendar``."""
+    if len(test_dates) == 0:
+        raise ValueError("test_dates must be non-empty when provided.")
+    cal_set = set(pd.DatetimeIndex(calendar))
+    out: List[pd.Timestamp] = []
+    for x in test_dates:
+        if isinstance(x, pd.Timestamp):
+            ts = x
+        elif isinstance(x, date):
+            ts = _utc_timestamp(x)
+        else:
+            ts = pd.Timestamp(x)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        if ts not in cal_set:
+            raise ValueError(f"test_dates entry {ts!r} is not present in the backtest calendar.")
+        out.append(ts)
+    return pd.DatetimeIndex(sorted(set(out)))
 
 
 def _build_calendar(
@@ -124,8 +151,9 @@ class BacktestEngine:
         method: str = "expanding",
         train_window: int = 252 * 5,
         test_window: int = 252,
+        test_dates: Sequence[date | pd.Timestamp] | None = None,
     ) -> BacktestResult:
-        """Execute one backtest over the last ``test_window`` dates in the requested range.
+        """Execute one backtest over ``test_window`` trailing dates, or over explicit ``test_dates``.
 
         For every calendar date ``d`` (including training history), each ``Signal.compute`` call
         receives only data causally available at ``d``:
@@ -147,7 +175,12 @@ class BacktestEngine:
             end_date: Inclusive range end (calendar date).
             method: ``"expanding"`` or ``"rolling"`` history window for signal inputs.
             train_window: Maximum in-sample length for rolling mode (trading days / bars).
-            test_window: Number of most recent dates in-range used as the test return series.
+            test_window: Number of most recent dates in-range used as the test return series
+                (ignored when ``test_dates`` is provided).
+            test_dates: Optional explicit evaluation dates (each must appear in the built calendar).
+                When set, the signal and price history spans the full ``[start_date, end_date]``
+                calendar so forward returns on the last OOS date are available whenever the
+                calendar extends beyond the final test timestamp.
 
         Returns:
             ``BacktestResult`` with per-test-date returns and summary statistics.
@@ -174,15 +207,27 @@ class BacktestEngine:
         instruments = list(prices_full.columns)
 
         calendar = _build_calendar(data, start_date, end_date)
-        if len(calendar) < train_window + test_window:
-            raise ValueError(
-                f"Need at least train_window + test_window ({train_window + test_window}) "
-                f"calendar rows; got {len(calendar)}."
-            )
-
-        test_dates = calendar[-test_window:]
-        pre_end = test_dates[-1]
-        history = calendar[calendar <= pre_end]
+        if test_dates is not None:
+            test_ix = _normalise_test_timestamps(test_dates, calendar)
+            prior_before_first = int((calendar < test_ix[0]).sum())
+            if method_l == "rolling" and prior_before_first < train_window:
+                raise ValueError(
+                    f"rolling mode needs at least train_window ({train_window}) strictly in-sample "
+                    f"bars before the first custom test date; got {prior_before_first}."
+                )
+            if prior_before_first < 1:
+                raise ValueError("Need at least one calendar row before the first custom test date.")
+            test_dates = test_ix
+            history = calendar
+        else:
+            if len(calendar) < train_window + test_window:
+                raise ValueError(
+                    f"Need at least train_window + test_window ({train_window + test_window}) "
+                    f"calendar rows; got {len(calendar)}."
+                )
+            test_dates = calendar[-test_window:]
+            pre_end = test_dates[-1]
+            history = calendar[calendar <= pre_end]
 
         logger.info(
             "BacktestEngine: calendar={n_cal} test={n_test} method={m}",
@@ -210,7 +255,7 @@ class BacktestEngine:
             columns=instruments
         )
 
-        prices_aligned = prices_full.reindex(history).ffill()
+        prices_aligned = prices_full.reindex(history).ffill().replace(0, np.nan)
 
         sizing_method = str(portfolio_config.get("sizing_method", "vol_target"))
         target_vol = float(portfolio_config.get("target_vol", 0.10))
@@ -224,7 +269,12 @@ class BacktestEngine:
         gross_list: List[float] = []
         trade_rows: List[pd.Series] = []
 
-        fwd_ret = prices_aligned.pct_change().shift(-1)
+        close_prices = (
+            prices_aligned["close"]
+            if "close" in prices_aligned.columns
+            else prices_aligned.iloc[:, 0]
+        )
+        fwd_ret = np.log(close_prices / close_prices.shift(1)).shift(-1)
 
         for t in test_dates:
             sub_sig = combined_signals.loc[combined_signals.index <= t]
@@ -239,8 +289,8 @@ class BacktestEngine:
                 net_limit=net_limit,
             )
             w_t = weights.loc[t]
-            fr = fwd_ret.loc[t] if t in fwd_ret.index else pd.Series(0.0, index=instruments)
-            gross_t = float((w_t.astype(float) * fr.fillna(0.0).astype(float)).sum())
+            fr_val = float(fwd_ret.loc[t]) if t in fwd_ret.index else 0.0
+            gross_t = float(w_t.astype(float).sum() * fr_val)
             gross_list.append(gross_t)
             trade_rows.append(trades.loc[t].astype(float))
 
