@@ -8,7 +8,7 @@
 ## Current Status
 **Phase:** 4 complete, pre-Phase 5 signal evaluation in progress
 **Tests:** 72 passing
-**Next action:** Run FX Carry signal evaluation
+**Next action:** Run Equity Momentum signal evaluation
 
 ---
 
@@ -58,8 +58,8 @@
 ### Pre-Phase 5 — Signal Evaluation
 - [x] Run SignalEvaluator on Rates Trend signal (TLT, 2010-2024)
 - [x] Apply DSR, PBO, Hansen SPA to Rates Trend
-- [ ] Run SignalEvaluator on FX Carry signal
-- [ ] Apply DSR, PBO, Hansen SPA to FX Carry
+- [x] Run SignalEvaluator on FX Carry signal
+- [x] Apply DSR, PBO, Hansen SPA to FX Carry
 - [ ] Run SignalEvaluator on Equity Momentum signal
 - [ ] Apply DSR, PBO, Hansen SPA to Equity Momentum
 - [ ] Document results in reports/signal_evaluation_phase1.md
@@ -73,6 +73,7 @@
 - FutureWarning: fill_method in pct_change in engine.py
 - GS10 from FRED returns only 109 rows (monthly frequency) — need to confirm frequency handling
 - Equity momentum universe is survivorship-biased (current S&P 500 only)
+- FX Carry evaluation uses DFF log returns as proxy — not ideal, should use actual FX pair returns
 
 ---
 
@@ -81,7 +82,7 @@
 | Signal | Best Horizon | IC Mean | ICIR | Hit Rate | Sharpe | DSR | PBO | Decision |
 |--------|-------------|---------|------|----------|--------|-----|-----|----------|
 | Rates Trend | 1d | 0.0117 | 0.1121 | 0.5120 | 0.2202 | 0.0000 | N/A | FAIL |
-| FX Carry | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| FX Carry | 1d | 0.0234 | 0.1501 | 0.8143 | 0.6138 | 0.0000 | N/A | BORDERLINE |
 | Equity Momentum | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 
 PBO not applicable for single-config signals — requires 2+ parameter configurations.
@@ -98,8 +99,19 @@ Decision: FAIL — IC_mean < 0.02 and ICIR < 0.3 at all horizons per roadmap thr
 DSR = 0.0 — right at boundary, not robustly passing.
 Note: 2022-2023 rates shock likely hurt this signal significantly in the OOS period.
 
-### FX Carry — Full Results
-TBD
+### FX Carry — Full Results (DFF/EUR/GBP rates, 2010-2024)
+| Horizon | IC | ICIR | Hit Rate | Sharpe |
+|---------|-----|------|----------|--------|
+| 1d | 0.0234 | 0.1501 | 0.8143 | 0.6138 |
+| 5d | 0.0313 | -0.3468 | 0.8071 | -0.4939 |
+| 21d | -0.0047 | -0.0505 | 0.8091 | -0.1898 |
+| 63d | 0.0075 | 0.0651 | 0.8122 | 0.1878 |
+
+Decision: BORDERLINE — IC_mean > 0.02 at 1d but ICIR < 0.3. Hit rate ~81% is strong.
+DSR = 0.0 — right at boundary.
+Note: Forward return proxy (DFF log returns) is not ideal for FX carry evaluation.
+The 81% hit rate against rate changes is interesting but the correct benchmark
+should be actual FX pair returns. This needs re-evaluation with proper FX data.
 
 ### Equity Momentum — Full Results
 TBD
