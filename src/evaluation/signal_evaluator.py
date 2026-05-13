@@ -164,7 +164,13 @@ class SignalEvaluator:
         if n_obs >= 1:
             s_vals = paired["signal"].to_numpy(dtype=float)
             f_vals = paired["fwd"].to_numpy(dtype=float)
-            hit_rate = float(np.mean(np.sign(s_vals) == np.sign(f_vals)))
+            nonzero_mask = s_vals != 0
+            if nonzero_mask.sum() > 0:
+                hit_rate = float(np.mean(
+                    np.sign(s_vals[nonzero_mask]) == np.sign(f_vals[nonzero_mask])
+                ))
+            else:
+                hit_rate = float("nan")
 
             pnl = s_vals * f_vals
             if pnl.size >= 2:
@@ -265,7 +271,13 @@ class SignalEvaluator:
         if n_obs > 0:
             sig_arr = paired["signal"].to_numpy(dtype=float)
             fwd_arr = paired["fwd"].to_numpy(dtype=float)
-            hit_rate = float(np.mean(np.sign(sig_arr) == np.sign(fwd_arr)))
+            nonzero_mask = sig_arr != 0
+            if nonzero_mask.sum() > 0:
+                hit_rate = float(np.mean(
+                    np.sign(sig_arr[nonzero_mask]) == np.sign(fwd_arr[nonzero_mask])
+                ))
+            else:
+                hit_rate = float("nan")
         else:
             hit_rate = float("nan")
 

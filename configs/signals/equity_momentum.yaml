@@ -3,9 +3,11 @@ signal:
   asset_class: equities
   signal_type: momentum
   frequency: monthly
+
 parameters:
   formation_months: 12
   skip_months: 1
   universe: sp500_current
   rebalance_freq: monthly
-
+  long_pct: 0.1
+  short_pct: 0.1
