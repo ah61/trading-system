@@ -8,7 +8,7 @@
 ## Current Status
 **Phase:** 4 complete, pre-Phase 5 signal evaluation in progress
 **Tests:** 72 passing
-**Next action:** Run Equity Momentum signal evaluation
+**Next action:** Investigate Equity Momentum hit rate anomaly, then make Phase 5 decision
 
 ---
 
@@ -60,8 +60,9 @@
 - [x] Apply DSR, PBO, Hansen SPA to Rates Trend
 - [x] Run SignalEvaluator on FX Carry signal
 - [x] Apply DSR, PBO, Hansen SPA to FX Carry
-- [ ] Run SignalEvaluator on Equity Momentum signal
-- [ ] Apply DSR, PBO, Hansen SPA to Equity Momentum
+- [x] Run SignalEvaluator on Equity Momentum signal (10-stock subset)
+- [x] Apply DSR to Equity Momentum
+- [ ] Investigate Equity Momentum hit rate anomaly (~9% vs expected ~50%)
 - [ ] Document results in reports/signal_evaluation_phase1.md
 - [ ] Decision: proceed to Phase 5 only if DSR > 0 and PBO < 0.5 for at least one signal
 
@@ -74,6 +75,7 @@
 - GS10 from FRED returns only 109 rows (monthly frequency) — need to confirm frequency handling
 - Equity momentum universe is survivorship-biased (current S&P 500 only)
 - FX Carry evaluation uses DFF log returns as proxy — not ideal, should use actual FX pair returns
+- Equity Momentum hit rate ~9% is anomalous — evaluator may be misaligning monthly signal with daily returns
 
 ---
 
@@ -83,7 +85,7 @@
 |--------|-------------|---------|------|----------|--------|-----|-----|----------|
 | Rates Trend | 1d | 0.0117 | 0.1121 | 0.5120 | 0.2202 | 0.0000 | N/A | FAIL |
 | FX Carry | 1d | 0.0234 | 0.1501 | 0.8143 | 0.6138 | 0.0000 | N/A | BORDERLINE |
-| Equity Momentum | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Equity Momentum | 63d | -0.0248 | -0.0718 | 0.0932 | 1.8041 | 1.0000 | N/A | INVESTIGATE |
 
 PBO not applicable for single-config signals — requires 2+ parameter configurations.
 
@@ -113,5 +115,23 @@ Note: Forward return proxy (DFF log returns) is not ideal for FX carry evaluatio
 The 81% hit rate against rate changes is interesting but the correct benchmark
 should be actual FX pair returns. This needs re-evaluation with proper FX data.
 
-### Equity Momentum — Full Results
-TBD
+### Equity Momentum — Full Results (10-stock subset, 2010-2024)
+| Horizon | IC | ICIR | Hit Rate | Sharpe |
+|---------|-----|------|----------|--------|
+| 1d | 0.0418 | 0.1410 | 0.0958 | 1.3686 |
+| 5d | -0.0007 | -0.0021 | 0.1008 | -0.5247 |
+| 21d | -0.0602 | -0.1681 | 0.0966 | -1.0227 |
+| 63d | -0.0248 | -0.0718 | 0.0932 | 1.8041 |
+
+Decision: INVESTIGATE — DSR = 1.0 is promising but hit rate ~9% is anomalous.
+Likely cause: multi-asset evaluator collapsing monthly signal against daily returns
+causing misalignment. Needs fix before results can be trusted.
+Universe: 10-stock subset only — not representative of full S&P 500 momentum.
+Survivorship bias applies — current members only.
+
+---
+
+## Phase 5 Decision
+PENDING — waiting for Equity Momentum investigation.
+FX Carry is borderline and warrants re-evaluation with proper FX return data.
+No signal clearly passes DSR > 0 and ICIR > 0.3 simultaneously yet.
