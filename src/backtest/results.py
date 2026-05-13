@@ -46,6 +46,27 @@ class BacktestResult:
     trades: pd.DataFrame
 
 
+@dataclass(slots=True)
+class CPCVResult:
+    """Outputs from combinatorial purged cross-validation (CPCV) over OOS paths.
+
+    Attributes:
+        oos_sharpe_distribution: One out-of-sample Sharpe ratio per evaluated CPCV path.
+        oos_sharpe_mean: Mean of ``oos_sharpe_distribution`` (finite values only).
+        oos_sharpe_std: Sample standard deviation of ``oos_sharpe_distribution``.
+        oos_sharpe_median: Median of ``oos_sharpe_distribution``.
+        pbo: Probability of backtest overfitting (rank-logit construction on IS vs OOS Sharpes).
+        n_paths: Number of OOS paths generated (capped combinatorially).
+    """
+
+    oos_sharpe_distribution: pd.Series
+    oos_sharpe_mean: float
+    oos_sharpe_std: float
+    oos_sharpe_median: float
+    pbo: float
+    n_paths: int
+
+
 def _max_drawdown_episode_duration(returns: pd.Series) -> int:
     """Count periods from the last touch of the pre-trough high until recovery to that high."""
     r = returns.dropna().astype(float)
