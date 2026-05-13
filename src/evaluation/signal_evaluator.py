@@ -100,6 +100,103 @@ class SignalEvaluator:
         return float(df.diff().abs().stack().mean())
 
     @staticmethod
+    def _rolling_spearman(x: pd.Series, y: pd.Series, window: int) -> pd.Series:
+        """Rolling Spearman IC over a fixed-size window.
+
+        Returns a Series aligned to ``x.index``; positions where the window cannot be
+        formed (or the window is degenerate) contain NaN.
+        """
+        n = int(len(x))
+        out = pd.Series(np.nan, index=x.index, dtype=float)
+        if window < 2 or n < window:
+            return out
+        arr_x = x.to_numpy(dtype=float)
+        arr_y = y.to_numpy(dtype=float)
+        for i in range(window - 1, n):
+            a = arr_x[i - window + 1 : i + 1]
+            b = arr_y[i - window + 1 : i + 1]
+            r = spearmanr(a, b, nan_policy="omit").correlation
+            out.iloc[i] = float(r) if r is not None and np.isfinite(r) else np.nan
+        return out
+
+    def _evaluate_single_asset(
+        self,
+        signal: pd.Series,
+        forward_returns: pd.Series,
+        horizon: int,
+    ) -> "SignalMetrics":
+        if horizon <= 0:
+            raise ValueError("horizon must be a positive integer.")
+
+        sig = signal.astype(float).sort_index()
+        fwd_full = forward_returns.astype(float).sort_index()
+        fwd = fwd_full.shift(-horizon - 1)
+
+        paired = pd.concat({"signal": sig, "fwd": fwd}, axis=1, join="inner").dropna()
+        n_obs = int(len(paired))
+
+        if n_obs >= 2:
+            s_vals = paired["signal"].to_numpy(dtype=float)
+            f_vals = paired["fwd"].to_numpy(dtype=float)
+            r = spearmanr(s_vals, f_vals, nan_policy="omit").correlation
+            ic_mean = float(r) if r is not None and np.isfinite(r) else float("nan")
+
+            rolling_ic = self._rolling_spearman(paired["signal"], paired["fwd"], window=63)
+            rolling_clean = rolling_ic.dropna()
+            if rolling_clean.size >= 2:
+                ic_std = float(np.nanstd(rolling_ic.to_numpy(dtype=float), ddof=1))
+                icir = (
+                    float(ic_mean / ic_std)
+                    if np.isfinite(ic_mean) and np.isfinite(ic_std) and ic_std != 0.0
+                    else float("nan")
+                )
+                ic_pos = float(np.nanmean((rolling_ic > 0.0).to_numpy(dtype=float)))
+            else:
+                ic_std = float("nan")
+                icir = float("nan")
+                ic_pos = float("nan")
+        else:
+            ic_mean = float("nan")
+            ic_std = float("nan")
+            icir = float("nan")
+            ic_pos = float("nan")
+
+        if n_obs >= 1:
+            s_vals = paired["signal"].to_numpy(dtype=float)
+            f_vals = paired["fwd"].to_numpy(dtype=float)
+            hit_rate = float(np.mean(np.sign(s_vals) == np.sign(f_vals)))
+
+            pnl = s_vals * f_vals
+            if pnl.size >= 2:
+                mu = float(np.mean(pnl))
+                sd = float(np.std(pnl, ddof=1))
+                sharpe = (
+                    float((mu / sd) * np.sqrt(252.0))
+                    if np.isfinite(sd) and sd != 0.0
+                    else float("nan")
+                )
+            else:
+                sharpe = float("nan")
+        else:
+            hit_rate = float("nan")
+            sharpe = float("nan")
+
+        turnover = float(sig.diff().abs().mean()) if sig.size >= 2 else float("nan")
+
+        return SignalMetrics(
+            ic_mean=ic_mean,
+            ic_std=ic_std,
+            icir=icir,
+            ic_positive_pct=ic_pos,
+            hit_rate=hit_rate,
+            signal_sharpe=sharpe,
+            turnover=turnover,
+            decay_halflife=1.0,
+            n_observations=n_obs,
+            forward_return_horizon=int(horizon),
+        )
+
+    @staticmethod
     def _decay_halflife(ic: pd.Series) -> float:
         x = ic.dropna().to_numpy(dtype=float)
         if x.size < 5:
@@ -124,7 +221,9 @@ class SignalEvaluator:
         """Evaluate a signal vs forward returns at a given horizon.
 
         Args:
-            signal: Signal Series indexed by (date, asset). Values should be in [-1, 1].
+            signal: Signal Series indexed by (date, asset) for the multi-asset path, or
+                by a plain ``DatetimeIndex`` for a single-asset signal. Values should be in
+                [-1, 1].
             forward_returns: Either:
                 - forward returns already aligned to (date, asset), or
                 - 1-day log returns (date, asset) in which case the forward return convention is applied
@@ -136,7 +235,10 @@ class SignalEvaluator:
             SignalMetrics containing IC statistics, hit rate, weighted-return Sharpe, turnover, and
             other diagnostics.
         """
-        # Support both call patterns:
+        if signal.index.nlevels == 1:
+            return self._evaluate_single_asset(signal, forward_returns, horizon)
+
+        # Multi-asset path. Support both call patterns:
         # - caller provides forward returns already (use as-is), or
         # - caller provides 1-day log returns (apply convention shift)
         fwd_as_is = forward_returns

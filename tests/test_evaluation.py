@@ -118,6 +118,29 @@ def test_n_observations_correct() -> None:
     assert m.n_observations == expected
 
 
+def test_evaluator_handles_single_asset_signal() -> None:
+    rng = np.random.default_rng(42)
+    dates = pd.date_range("2024-01-01", periods=200, freq="B", tz="UTC")
+
+    signal_vals = rng.normal(size=len(dates))
+    fwd_vals = signal_vals * 0.5 + rng.normal(scale=0.5, size=len(dates))
+
+    signal = pd.Series(signal_vals, index=dates, dtype=float, name="signal")
+    log_returns = pd.Series(fwd_vals, index=dates, dtype=float, name="ret")
+
+    ev = SignalEvaluator()
+    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=1)
+
+    assert m.forward_return_horizon == 1
+    # After applying shift(-(horizon + 1)) the last 2 obs become NaN and are dropped.
+    assert m.n_observations == len(dates) - 2
+    assert np.isfinite(m.ic_mean)
+    assert np.isfinite(m.hit_rate)
+    assert 0.0 <= m.hit_rate <= 1.0
+    assert np.isfinite(m.turnover)
+    assert m.decay_halflife == 1.0
+
+
 def test_dsr_perfect_signal_high() -> None:
     dsr = deflated_sharpe_ratio(
         observed_sharpe=3.0,
