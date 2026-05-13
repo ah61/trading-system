@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import fields
+from pathlib import Path
 from typing import Any, Dict, List
 
+import matplotlib
+
+matplotlib.use("Agg")
+
+from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,6 +21,7 @@ from src.backtest import cpcv as cpcv_mod
 from src.backtest.cpcv import CPCVEngine
 from src.backtest.engine import BacktestEngine
 from src.backtest.results import BacktestResult, CPCVResult
+from src.backtest.tearsheet import TearsheetGenerator
 from src.backtest.walk_forward import (
     WalkForwardEngine,
     expanding_fold_train_bar_counts,
@@ -339,3 +347,71 @@ def test_cpcv_pbo_between_zero_and_one() -> None:
         k_test=2,
     )
     assert 0.0 <= res.pbo <= 1.0
+
+
+def _synthetic_backtest_result() -> BacktestResult:
+    idx = pd.date_range("2021-01-01", periods=300, freq="D", tz="UTC")
+    base = pd.Series(0.0005 + 0.002 * np.sin(np.arange(len(idx)) / 12.0), index=idx)
+    costs = pd.Series(0.00005 + 0.00002 * (np.arange(len(idx)) % 5 == 0), index=idx)
+    gross_returns = base.astype(float)
+    net_returns = (base - costs).astype(float)
+    trades = pd.DataFrame(
+        {
+            "AAA": 0.01 * np.sin(np.arange(len(idx)) / 7.0),
+            "BBB": 0.01 * np.cos(np.arange(len(idx)) / 9.0),
+        },
+        index=idx,
+    )
+    return BacktestResult(
+        gross_returns=gross_returns,
+        net_returns=net_returns,
+        annualised_return=0.12,
+        annualised_vol=0.18,
+        sharpe_ratio=1.25,
+        sortino_ratio=1.75,
+        max_drawdown=-0.08,
+        max_drawdown_duration=42,
+        calmar_ratio=1.5,
+        hit_rate=0.54,
+        avg_trade_return=0.0007,
+        total_cost_bps=150.0,
+        turnover_annual=4.2,
+        trades=trades,
+    )
+
+
+def test_tearsheet_returns_figure() -> None:
+    result = _synthetic_backtest_result()
+    fig = TearsheetGenerator().generate(result)
+
+    assert isinstance(fig, Figure)
+    plt.close(fig)
+
+
+def test_tearsheet_saves_file(tmp_path: Path) -> None:
+    result = _synthetic_backtest_result()
+    output_path = tmp_path / "tearsheet.png"
+
+    fig = TearsheetGenerator().generate(result, output_path=output_path)
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    plt.close(fig)
+
+
+def test_summary_dict_has_required_keys() -> None:
+    result = _synthetic_backtest_result()
+
+    assert set(result.summary_dict()) == {
+        "annualised_return",
+        "annualised_vol",
+        "sharpe_ratio",
+        "sortino_ratio",
+        "max_drawdown",
+        "max_drawdown_duration",
+        "calmar_ratio",
+        "hit_rate",
+        "avg_trade_return",
+        "total_cost_bps",
+        "turnover_annual",
+    }

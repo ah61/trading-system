@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from src.backtest.cpcv import CPCVEngine
 from src.backtest.engine import BacktestEngine
-from src.backtest.results import BacktestResult
+from src.backtest.results import BacktestResult, CPCVResult
+from src.backtest.tearsheet import TearsheetGenerator
 from src.backtest.walk_forward import (
     WalkForwardEngine,
     expanding_fold_train_bar_counts,
@@ -13,6 +15,9 @@ from src.backtest.walk_forward import (
 __all__ = [
     "BacktestEngine",
     "BacktestResult",
+    "CPCVEngine",
+    "CPCVResult",
+    "TearsheetGenerator",
     "WalkForwardEngine",
     "expanding_fold_train_bar_counts",
     "rolling_fold_train_bar_counts",

@@ -45,6 +45,26 @@ class BacktestResult:
     turnover_annual: float
     trades: pd.DataFrame
 
+    def summary_dict(self) -> dict[str, float | int]:
+        """Return scalar summary fields for display and reporting.
+
+        Returns:
+            Mapping of scalar performance statistic names to values.
+        """
+        return {
+            "annualised_return": self.annualised_return,
+            "annualised_vol": self.annualised_vol,
+            "sharpe_ratio": self.sharpe_ratio,
+            "sortino_ratio": self.sortino_ratio,
+            "max_drawdown": self.max_drawdown,
+            "max_drawdown_duration": self.max_drawdown_duration,
+            "calmar_ratio": self.calmar_ratio,
+            "hit_rate": self.hit_rate,
+            "avg_trade_return": self.avg_trade_return,
+            "total_cost_bps": self.total_cost_bps,
+            "turnover_annual": self.turnover_annual,
+        }
+
 
 @dataclass(slots=True)
 class CPCVResult:
