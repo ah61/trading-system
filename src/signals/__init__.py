@@ -1,0 +1,2 @@
+"""Signal definitions and utilities."""
+
