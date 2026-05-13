@@ -102,12 +102,29 @@ class YahooSource(DataSource):
         if not isinstance(raw.index, pd.DatetimeIndex):
             raise DataFetchError(f"Yahoo returned non-datetime index for {ticker!r}.")
 
-        if "Close" in raw.columns:
-            close = raw["Close"]
-        elif "Adj Close" in raw.columns:
-            close = raw["Adj Close"]
+        # yfinance returns MultiIndex columns like ('Close', 'TLT') for single-ticker
+        # downloads in newer versions. Flatten to the OHLCV field level so the rest of
+        # this method can treat columns as simple strings.
+        if isinstance(raw.columns, pd.MultiIndex):
+            try:
+                flat = raw.xs(ticker, axis=1, level=1)
+            except KeyError:
+                flat = raw.droplevel(1, axis=1)
+        else:
+            flat = raw
+
+        lower_to_actual = {str(c).lower(): c for c in flat.columns}
+        if "close" in lower_to_actual:
+            close_col = lower_to_actual["close"]
+        elif "adj close" in lower_to_actual:
+            close_col = lower_to_actual["adj close"]
         else:
             raise DataFetchError(f"Yahoo returned no Close column for {ticker!r}.")
+
+        close = flat[close_col]
+        if isinstance(close, pd.DataFrame):
+            # Defensive: if duplicate columns remain, take the first one.
+            close = close.iloc[:, 0]
 
         idx = pd.to_datetime(close.index, utc=True)
         df = pd.DataFrame(
