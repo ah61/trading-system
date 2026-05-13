@@ -1,0 +1,16 @@
+# S&P 500 current constituents (survivorship-biased — current membership only)
+# WARNING: Using current S&P 500 members for historical backtest introduces
+# survivorship bias. Returns will be overstated, especially pre-2010.
+# Phase 2 fix: replace with CRSP point-in-time universe.
+
+tickers:
+  - AAPL
+  - MSFT
+  - JPM
+  - JNJ
+  - XOM
+  - WMT
+  - PG
+  - BAC
+  - CVX
+  - HD
