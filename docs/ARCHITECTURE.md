@@ -1,9 +1,17 @@
 # ARCHITECTURE.md
 # Systematic Multi-Asset Trading System
 
-**Version:** 0.1 (Seed)
-**Last Updated:** 2026-04
-**Status:** Pre-implementation — specification only
+**Version:** 0.2
+**Last Updated:** 2026-05-14
+**Status:** Phases 0–4 implemented; Phase 5 (Signal Hardening) in progress
+
+**Vocabulary note (v0.2):** This document uses **"Stage 1"** and **"Stage 2"**
+to describe the data-quality tier of the system — Stage 1 is the current
+public-data implementation (FRED, Yahoo, ETF proxies); Stage 2 is the
+post-Bloomberg / point-in-time upgrade. These map to **Phases 0–6** and
+**Phase 7** respectively in `ROADMAP.md`. Previous versions of this document
+used "Phase 1 / Phase 2" for these tiers, which collided with the ROADMAP
+phase numbers. All such references have been renamed in v0.2.
 
 ---
 
@@ -37,7 +45,7 @@ If a design decision is made that changes this document, update it immediately a
 6. **Transaction costs are real.** If a strategy does not survive realistic cost modelling,
    it does not exist.
 
-### 1.2 Target Asset Classes (Phase 1)
+### 1.2 Target Asset Classes (Stage 1)
 
 | Asset Class | Instruments (Stage 1)         | Instruments (Stage 2, post-Bloomberg) |
 |-------------|-------------------------------|---------------------------------------|
@@ -47,19 +55,19 @@ If a design decision is made that changes this document, update it immediately a
 
 ### 1.3 Signal Universe (Target — build incrementally)
 
-| Asset Class | Signal           | Type            | Priority |
-|-------------|------------------|-----------------|----------|
-| FX          | Carry            | Risk premium    | Phase 1  |
-| FX          | Momentum         | Trend           | Phase 1  |
-| FX          | PPP deviation    | Value/MR        | Phase 2  |
-| FX          | Positioning      | Sentiment       | Phase 2  |
-| FX          | Macro surprise   | Macro           | Phase 2  |
-| Rates       | Trend (SMA)      | Trend           | Phase 1  |
-| Rates       | Carry (slope)    | Risk premium    | Phase 1  |
-| Rates       | Macro surprise   | Macro           | Phase 2  |
-| Equities    | Momentum (12-1)  | Trend           | Phase 1  |
-| Equities    | Value (E/P)      | Value           | Phase 2  |
-| Equities    | Quality          | Factor          | Phase 2  |
+| Asset Class | Signal           | Type            | Stage   |
+|-------------|------------------|-----------------|---------|
+| FX          | Carry            | Risk premium    | Stage 1 |
+| FX          | Momentum         | Trend           | Stage 1 |
+| FX          | PPP deviation    | Value/MR        | Stage 2 |
+| FX          | Positioning      | Sentiment       | Stage 2 |
+| FX          | Macro surprise   | Macro           | Stage 2 |
+| Rates       | Trend (SMA)      | Trend           | Stage 1 |
+| Rates       | Carry (slope)    | Risk premium    | Stage 1 |
+| Rates       | Macro surprise   | Macro           | Stage 2 |
+| Equities    | Momentum (12-1)  | Trend           | Stage 1 |
+| Equities    | Value (E/P)      | Value           | Stage 2 |
+| Equities    | Quality          | Factor          | Stage 2 |
 
 ---
 
@@ -73,7 +81,7 @@ If a design decision is made that changes this document, update it immediately a
 │   ├── FREDSource        (macro, rates, Alfred vintages)  │
 │   ├── YahooSource       (equities, ETF proxies)          │
 │   ├── IBSource          (live feed, paper trading)       │
-│   └── QuandlSource      (futures, phase 2)               │
+│   └── QuandlSource      (futures, Stage 2)               │
 │                                                          │
 │   DataCleaner           (outliers, fills, adjustments)   │
 │   DataStore             (DuckDB, raw/adjusted/derived)   │
@@ -155,7 +163,7 @@ Key behaviours:
   look-ahead bias from data revisions.
 - Series list stored in `configs/data/fred_series.yaml`, not hardcoded
 
-Priority series (Phase 1):
+Priority series (Stage 1):
 - `DFF` — Fed Funds Rate (FX carry proxy)
 - `GS10` — 10Y Treasury yield
 - `T10YIE` — 10Y inflation breakeven
@@ -172,7 +180,7 @@ Key behaviours:
 - Flag known data quality issues per ticker in `configs/data/yahoo_known_issues.yaml`
 - For equities universe: document survivorship bias limitation explicitly in metadata
 
-Priority tickers (Phase 1):
+Priority tickers (Stage 1):
 - ETF proxies: `TLT`, `IEF`, `SHY`, `HYG`
 - FX pairs: `EURUSD=X`, `GBPUSD=X`, `AUDUSD=X`, `NZDUSD=X`, `USDCAD=X`, `USDCHF=X`, `USDJPY=X`
 - Equity universe: current S&P 500 constituents (sourced from Wikipedia scrape, documented as survivorship-biased)
@@ -182,11 +190,13 @@ Priority tickers (Phase 1):
 
 Key behaviours:
 - Use `ib_insync` library
-- Used for paper trading validation and live execution only in Phase 1
+- Used for paper trading validation and live execution only in Stage 1
+  (Stage 1 = ROADMAP Phase 6 paper trading; pre-Bloomberg historical data still
+  sourced from FRED/Yahoo)
 - Historical data from IB used only for reconciliation, not primary backtesting source
 - Requires TWS or IB Gateway running locally on port 7497 (paper) / 7496 (live)
 
-#### QuandlSource (Phase 2)
+#### QuandlSource (Stage 2)
 **File:** `src/data/sources/quandl.py`
 
 - Futures continuous contracts (CME, ICE)
@@ -203,7 +213,7 @@ Key behaviours:
   - Forward fill up to 3 consecutive business days (document assumption)
   - Beyond 3 days: raise `DataGapError`, do not silently fill
 - Corporate actions handler for equities (verify Yahoo adjustments)
-- Futures roll handler (Phase 2): back-adjusted vs. proportional adjustment
+- Futures roll handler (Stage 2): back-adjusted vs. proportional adjustment
 - All cleaning operations are logged with reasons — never silently modify data
 
 **Output:** Cleaned DataFrame with added columns:
@@ -271,7 +281,9 @@ class Signal(ABC):
         """Standardise signal. Default: rolling z-score. Subclasses may override."""
 
     def evaluate(self, signal: pd.Series, forward_returns: pd.Series) -> SignalMetrics:
-        """Compute IC, ICIR, hit rate, Sharpe, decay. Returns SignalMetrics dataclass."""
+        """Convenience wrapper around `SignalEvaluator.evaluate()`. Computes IC, ICIR,
+        hit rate, Sharpe, decay at the signal's natural `frequency`. Returns a
+        `SignalMetrics` dataclass. See `src/evaluation/signal_evaluator.py`."""
 
     def get_metadata(self) -> dict:
         """Returns full signal specification for logging and reproducibility."""
@@ -280,7 +292,7 @@ class Signal(ABC):
 **Rule:** `compute()` may only use data with index <= current date. The BacktestEngine
 enforces this by slicing data before passing to `compute()`.
 
-### 4.2 Signal Implementations (Phase 1)
+### 4.2 Signal Implementations (Stage 1)
 
 #### FX Carry Signal
 **File:** `src/signals/fx/carry.py`
@@ -363,16 +375,26 @@ class SignalMetrics:
     ic_std: float           # Std of IC
     icir: float             # IC / IC_std — target > 0.5
     ic_positive_pct: float  # % of periods with positive IC
-    hit_rate: float         # % directionally correct predictions
-    signal_sharpe: float    # Sharpe of returns weighted by signal
+    hit_rate: float         # % directionally correct predictions (zero signals excluded)
+    signal_sharpe: float    # Annualised Sharpe of signal-weighted returns
     turnover: float         # Mean absolute change in signal per period
     decay_halflife: int     # Periods for IC to decay to 50% — determines rebalance freq
     n_observations: int
-    forward_return_horizon: int  # days
+    forward_return_horizon: int  # In periods of `frequency` (see below)
+    frequency: str          # 'daily' | 'weekly' | 'monthly'
 ```
 
-**Evaluation horizons:** Always evaluate at 1, 5, 21, 63 days. Report all.
-The horizon with the strongest IC determines the signal's natural rebalancing frequency.
+**Evaluation horizons:** Default — evaluate at 1, 5, 21, 63 days for daily signals;
+at 1, 2, 3, 6 months for monthly signals; analogous for weekly. The horizon with
+the strongest IC determines the signal's natural rebalancing frequency.
+
+**Frequency layer (Milestone 5.2):** `SignalEvaluator.evaluate(..., frequency=...)`
+resamples both signal and returns to the chosen frequency before evaluation. The
+signal is resampled by taking the first non-zero value per period (carrying
+forward for all-zero periods); log returns are summed over each period
+(compounding under the log convention, CONVENTIONS.md §3.2). The forward-return
+shift `shift(-(horizon + 1))` is applied in periods of the chosen frequency.
+Annualisation of Sharpe uses 252 / 52 / 12 for daily / weekly / monthly.
 
 ### 4.4 SignalCorrector
 
@@ -440,7 +462,7 @@ Combination methods (implement in this order):
 1. **Equal weight** — baseline, always computed for comparison
 2. **IC-weighted** — weight by rolling ICIR over trailing 252 days
 3. **Correlation-penalised** — IC-weighted but penalise signals with high pairwise correlation
-4. **MVO-weighted** — treat signals as assets, mean-variance optimise (Phase 2)
+4. **MVO-weighted** — treat signals as assets, mean-variance optimise (Stage 2)
 
 ```python
 class SignalCombiner:
@@ -502,7 +524,7 @@ Methods:
 - Use rolling 60-day realised vol for σ_instrument
 
 **Risk parity across asset classes:**
-- Each asset class gets equal risk budget (1/3 each for Phase 1)
+- Each asset class gets equal risk budget (1/3 each for Stage 1)
 - Within asset class: vol-weight individual positions
 
 **Kelly (reference only initially):**
@@ -525,7 +547,7 @@ def estimate_cost(self, trade: Trade, adv: float) -> float
 def apply_costs(self, gross_returns: pd.Series, trades: pd.DataFrame) -> pd.Series
 ```
 
-**Spread assumptions (conservative, Phase 1):**
+**Spread assumptions (conservative, Stage 1):**
 - G10 FX spot: 1-2 bps
 - Treasury ETFs: 1-3 bps
 - Large-cap equities: 3-10 bps
@@ -571,7 +593,7 @@ Two modes:
 2. **Rolling fixed window:** both windows slide forward
    - Use for mean-reversion signals with shorter memory
 
-**Default split (Phase 1):**
+**Default split (Stage 1):**
 - Train: 2010-01-01 to 2019-12-31 (in-sample)
 - Test: 2020-01-01 to present (out-of-sample)
 - Rationale: OOS period contains COVID (2020), rates shock (2022), AI rally (2023-24)
@@ -695,13 +717,16 @@ Enforced via `pytest` import tests — any violation fails CI.
 
 ---
 
-## 11. Known Limitations (Phase 1 — Document, Do Not Hide)
+## 11. Known Limitations (Stage 1 — Document, Do Not Hide)
 
-| Limitation | Impact | Fix in Phase |
-|------------|--------|--------------|
-| FX carry uses rate differential proxy, not forward rates | Carry P&L approximate | Phase 2 (Bloomberg) |
-| Equity universe is survivorship-biased (current SP500 only) | Backtest returns overstated, especially pre-2010 | Phase 2 (CRSP/point-in-time) |
-| Rates use ETF proxies, not futures | No leverage dynamics, tracking error | Phase 2 (Quandl futures) |
+These are the limitations of the current Stage 1 implementation (public data:
+FRED, Yahoo, ETF proxies). Stage 2 = post-Bloomberg upgrade = ROADMAP Phase 7.2.
+
+| Limitation | Impact | Fix |
+|------------|--------|-----|
+| FX carry uses rate differential proxy, not forward rates | Carry P&L approximate | Stage 2 — Bloomberg forward rates (ROADMAP Phase 7.2) |
+| Equity universe is survivorship-biased (current SP500 only) | Backtest returns overstated, especially pre-2010 | Stage 2 — CRSP/point-in-time (ROADMAP Phase 7.2) |
+| Rates use ETF proxies, not futures | No leverage dynamics, tracking error | Stage 2 — Quandl futures (ROADMAP Phase 7.2) |
 | IB historical data used for reconciliation only | Primary backtest data from Yahoo/FRED | Ongoing |
-| No short-selling cost model for equities | Long-short equity P&L overstated | Phase 2 |
-| FRED macro data not fully point-in-time for all series | Minor lookahead bias on revised series | Ongoing (use Alfred) |
+| No short-selling cost model for equities | Long-short equity P&L overstated | Stage 2 (ROADMAP Phase 7.2) |
+| FRED macro data not fully point-in-time for all series | Minor lookahead bias on revised series | Ongoing (use Alfred where available) |
