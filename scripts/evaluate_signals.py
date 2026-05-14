@@ -1,0 +1,379 @@
+"""Evaluate all Phase 1 / Stage 1 signals through the SignalEvaluator frequency layer.
+
+This script is the reproducible entry point for Milestone 5.2's "re-run all signal
+evaluations at correct frequency" step. It loads each signal from its YAML config,
+fetches the required data live from FRED/Yahoo, runs the new frequency-layer
+SignalEvaluator, and writes a Markdown report to `reports/signal_evaluation_phase1.md`.
+
+Usage (from repo root):
+    python scripts/evaluate_signals.py
+    python scripts/evaluate_signals.py --start 2010-01-01 --end 2024-12-31
+    python scripts/evaluate_signals.py --signal rates_trend  # one signal only
+
+Notes:
+    - Hits the network. Until Milestone 5.4 (Data Persistence) is done, this
+      script does NOT use DataStore. Replace the fetch_* helpers when 5.4 lands.
+    - FX Carry pair returns match the PROGRESS.md methodology (Option A):
+      EURUSD=X and GBPUSD=X from Yahoo, inverse pairs negated. EUR/GBP and
+      GBP/EUR pairs get NaN forward returns and are dropped from the cross-section.
+      This is intentional — Milestone 5.5 will revisit pair construction.
+    - Equity Momentum runs against the configured universe in
+      `configs/universes/sp500_current.yaml`. Per PROGRESS.md, current cached
+      universe is 50 stocks.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+# Project root on sys.path so `python scripts/evaluate_signals.py` works.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.data.cached_source import CachedSource
+from src.data.sources.fred import FREDSource
+from src.data.sources.yahoo import YahooSource
+from src.data.store import DataStore
+from src.evaluation.signal_evaluator import SignalEvaluator, SignalMetrics
+from src.signals.equities.momentum import EquityMomentumSignal
+from src.signals.fx.carry import FXCarrySignal
+from src.signals.rates.trend import RatesTrendSignal
+
+
+DEFAULT_START = date(2010, 1, 1)
+DEFAULT_END = date(2024, 12, 31)
+REPORT_PATH = ROOT / "reports" / "signal_evaluation_phase1.md"
+DATA_DIR = ROOT / "data"
+
+
+# ---------------------------------------------------------------------------
+# Data fetching — Milestone 5.4 routes through DataStore via CachedSource.
+# First run fetches from FRED/Yahoo and writes to data/raw/raw.duckdb.
+# Subsequent runs read from the store; no network calls.
+# Use --refresh on the CLI to force a re-fetch.
+# ---------------------------------------------------------------------------
+
+
+def _make_cached_fred() -> CachedSource:
+    store = DataStore(data_dir=DATA_DIR)
+    return CachedSource(source=FREDSource(), store=store, source_name="fred")
+
+
+def _make_cached_yahoo() -> CachedSource:
+    store = DataStore(data_dir=DATA_DIR)
+    return CachedSource(source=YahooSource(), store=store, source_name="yahoo")
+
+
+def fetch_fred(
+    series_ids: list[str], start: date, end: date, *, force_refresh: bool = False
+) -> dict[str, pd.DataFrame]:
+    """Fetch FRED series, caching to data/raw/raw.duckdb."""
+    cached = _make_cached_fred()
+    out: dict[str, pd.DataFrame] = {}
+    for sid in series_ids:
+        out[sid] = cached.fetch_or_load(
+            sid, start, end, frequency="daily", force_refresh=force_refresh
+        )
+    return out
+
+
+def fetch_yahoo(
+    tickers: list[str], start: date, end: date, *, force_refresh: bool = False
+) -> dict[str, pd.DataFrame]:
+    """Fetch Yahoo tickers, caching to data/raw/raw.duckdb."""
+    cached = _make_cached_yahoo()
+    out: dict[str, pd.DataFrame] = {}
+    for tkr in tickers:
+        out[tkr] = cached.fetch_or_load(
+            tkr, start, end, frequency="daily", force_refresh=force_refresh
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Forward-return construction per signal
+# ---------------------------------------------------------------------------
+
+
+def rates_trend_forward_returns(tlt_df: pd.DataFrame) -> pd.Series:
+    """Single-asset daily log returns for TLT."""
+    close = tlt_df["close"].astype(float).sort_index()
+    return np.log(close / close.shift(1)).dropna()
+
+
+def equity_momentum_forward_returns(
+    price_data: dict[str, pd.DataFrame],
+) -> pd.Series:
+    """Per-ticker daily log returns, returned as MultiIndex (date, ticker) Series.
+
+    The frequency layer in SignalEvaluator will resample these to monthly.
+    """
+    series_by_ticker = {}
+    for tkr, df in price_data.items():
+        close = df["close"].astype(float).sort_index()
+        ret = np.log(close / close.shift(1))
+        series_by_ticker[tkr] = ret
+    panel = pd.DataFrame(series_by_ticker).sort_index()
+    stacked = panel.stack(future_stack=True)
+    stacked.index = stacked.index.set_names(["date", "ticker"])
+    return stacked.astype(float)
+
+
+def fx_carry_forward_returns(
+    eurusd_df: pd.DataFrame,
+    gbpusd_df: pd.DataFrame,
+    pairs_in_signal: list[str],
+) -> pd.Series:
+    """Construct per-pair daily log returns matching the signal's pair list.
+
+    Methodology (Option A — matches PROGRESS.md):
+      - For pair X/Y: use log_return of the X-base spot rate.
+      - We only have EURUSD and GBPUSD from Yahoo, so:
+          USD/EUR: -log_return(EURUSD)    (USD-base, derived by negation)
+          EUR/USD: +log_return(EURUSD)
+          USD/GBP: -log_return(GBPUSD)
+          GBP/USD: +log_return(GBPUSD)
+          USD/USD, EUR/EUR, etc.: not generated by _iter_pairs (a != b filter)
+          EUR/GBP, GBP/EUR: NaN (no Yahoo EURGBP fetched — Milestone 5.5)
+    """
+    eurusd = eurusd_df["close"].astype(float).sort_index()
+    gbpusd = gbpusd_df["close"].astype(float).sort_index()
+    r_eurusd = np.log(eurusd / eurusd.shift(1))
+    r_gbpusd = np.log(gbpusd / gbpusd.shift(1))
+
+    common_index = r_eurusd.index.intersection(r_gbpusd.index).sort_values()
+
+    series_by_pair: dict[str, pd.Series] = {}
+    for pair in pairs_in_signal:
+        try:
+            base, quote = pair.split("/")
+        except ValueError:
+            logger.warning("Unparseable pair label: {!r}", pair)
+            continue
+
+        ret: pd.Series
+        if base == "EUR" and quote == "USD":
+            ret = r_eurusd
+        elif base == "USD" and quote == "EUR":
+            ret = -r_eurusd
+        elif base == "GBP" and quote == "USD":
+            ret = r_gbpusd
+        elif base == "USD" and quote == "GBP":
+            ret = -r_gbpusd
+        else:
+            # EUR/GBP, GBP/EUR — no Yahoo data fetched for Option A.
+            ret = pd.Series(np.nan, index=common_index)
+
+        series_by_pair[pair] = ret.reindex(common_index)
+
+    panel = pd.DataFrame(series_by_pair).sort_index()
+    stacked = panel.stack(future_stack=True)
+    stacked.index = stacked.index.set_names(["date", "pair"])
+    return stacked.astype(float)
+
+
+# ---------------------------------------------------------------------------
+# Evaluation per signal
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    signal_name: str
+    frequency: str
+    rows: list[tuple[int, SignalMetrics]]  # (horizon, metrics)
+
+
+def evaluate_at_horizons(
+    signal: pd.Series,
+    forward_returns: pd.Series,
+    horizons: list[int],
+    frequency: str,
+) -> list[tuple[int, SignalMetrics]]:
+    ev = SignalEvaluator()
+    out = []
+    for h in horizons:
+        m = ev.evaluate(signal=signal, forward_returns=forward_returns,
+                        horizon=h, frequency=frequency)
+        out.append((h, m))
+    return out
+
+
+def evaluate_rates_trend(start: date, end: date, *, force_refresh: bool = False) -> EvaluationResult:
+    logger.info("=== Rates Trend ===")
+    sig_obj = RatesTrendSignal()
+    tickers = list(sig_obj.required_data)
+    data = fetch_yahoo(tickers, start, end, force_refresh=force_refresh)
+    signal = sig_obj.compute(data).dropna()
+    fwd = rates_trend_forward_returns(data[tickers[0]])
+    horizons = [1, 5, 21, 63]  # days
+    rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
+    return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
+
+
+def evaluate_fx_carry(start: date, end: date, *, force_refresh: bool = False) -> EvaluationResult:
+    logger.info("=== FX Carry ===")
+    sig_obj = FXCarrySignal()
+    fred_data = fetch_fred(list(sig_obj.required_data), start, end, force_refresh=force_refresh)
+    yahoo_data = fetch_yahoo(["EURUSD=X", "GBPUSD=X"], start, end, force_refresh=force_refresh)
+    signal = sig_obj.compute(fred_data).dropna()
+
+    # Extract pair labels from the MultiIndex.
+    pairs_in_signal = sorted({p for _, p in signal.index})
+    logger.info("FX Carry pairs in signal: {}", pairs_in_signal)
+
+    fwd = fx_carry_forward_returns(
+        eurusd_df=yahoo_data["EURUSD=X"],
+        gbpusd_df=yahoo_data["GBPUSD=X"],
+        pairs_in_signal=pairs_in_signal,
+    )
+    horizons = [1, 2, 3, 6]  # months
+    rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
+    return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
+
+
+def evaluate_equity_momentum(start: date, end: date, *, force_refresh: bool = False) -> EvaluationResult:
+    logger.info("=== Equity Momentum ===")
+    sig_obj = EquityMomentumSignal()
+    tickers = list(sig_obj.required_data)
+    logger.info("Equity Momentum universe: {} tickers", len(tickers))
+    data = fetch_yahoo(tickers, start, end, force_refresh=force_refresh)
+    signal = sig_obj.compute(data).dropna()
+    fwd = equity_momentum_forward_returns(data)
+    horizons = [1, 2, 3, 6]  # months
+    rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
+    return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
+
+
+# ---------------------------------------------------------------------------
+# Report writing
+# ---------------------------------------------------------------------------
+
+
+def format_metrics_row(horizon: int, m: SignalMetrics, freq: str) -> str:
+    horizon_label = {"daily": "d", "weekly": "w", "monthly": "m"}.get(freq, "?")
+    return (
+        f"| {horizon}{horizon_label} "
+        f"| {m.ic_mean:+.4f} "
+        f"| {m.icir:+.4f} "
+        f"| {m.hit_rate:.4f} "
+        f"| {m.signal_sharpe:+.4f} "
+        f"| {m.n_observations} |"
+    )
+
+
+def render_report(results: list[EvaluationResult], start: date, end: date) -> str:
+    lines: list[str] = []
+    lines.append("# Signal Evaluation — Phase 1 / Stage 1\n")
+    lines.append(f"**Generated:** {date.today().isoformat()}  ")
+    lines.append(f"**Evaluation period:** {start.isoformat()} to {end.isoformat()}  ")
+    lines.append("**Evaluator:** SignalEvaluator with Milestone 5.2 frequency layer.\n")
+    lines.append("This report is auto-generated by `scripts/evaluate_signals.py`. ")
+    lines.append("Do not edit by hand — re-run the script.\n")
+    lines.append("---\n")
+
+    for r in results:
+        lines.append(f"## {r.signal_name} ({r.frequency} frequency)\n")
+        lines.append("| Horizon | IC Mean | ICIR | Hit Rate | Sharpe | N |")
+        lines.append("|---|---|---|---|---|---|")
+        for horizon, m in r.rows:
+            lines.append(format_metrics_row(horizon, m, r.frequency))
+        lines.append("")
+    lines.append("---\n")
+    lines.append("## Methodology Notes\n")
+    lines.append("- **Rates Trend:** TLT close-to-close log returns, daily horizons.")
+    lines.append("- **FX Carry:** USDEUR/EURUSD/USDGBP/GBPUSD log returns from Yahoo, "
+                 "inverse pairs negated. EUR/GBP and GBP/EUR pairs get NaN returns and "
+                 "drop from the cross-section. Milestone 5.5 will revisit pair construction.")
+    lines.append("- **Equity Momentum:** Per-ticker daily log returns, resampled to "
+                 "monthly by the frequency layer (sum of log returns).")
+    lines.append("- **Annualisation:** Sharpe annualised by sqrt(252) for daily, "
+                 "sqrt(12) for monthly (frequency layer handles automatically).")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+SIGNAL_REGISTRY = {
+    "rates_trend": evaluate_rates_trend,
+    "fx_carry": evaluate_fx_carry,
+    "equity_momentum": evaluate_equity_momentum,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run SignalEvaluator on all Phase 1 / Stage 1 signals."
+    )
+    parser.add_argument(
+        "--start", type=date.fromisoformat, default=DEFAULT_START,
+        help=f"Start date (YYYY-MM-DD). Default: {DEFAULT_START.isoformat()}.",
+    )
+    parser.add_argument(
+        "--end", type=date.fromisoformat, default=DEFAULT_END,
+        help=f"End date (YYYY-MM-DD). Default: {DEFAULT_END.isoformat()}.",
+    )
+    parser.add_argument(
+        "--signal", choices=list(SIGNAL_REGISTRY.keys()), default=None,
+        help="Run only one signal. Default: run all three.",
+    )
+    parser.add_argument(
+        "--no-report", action="store_true",
+        help="Skip writing the markdown report.",
+    )
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="Bypass the DataStore cache and re-fetch all data from FRED/Yahoo.",
+    )
+    args = parser.parse_args(argv)
+
+    targets = [args.signal] if args.signal else list(SIGNAL_REGISTRY.keys())
+
+    results: list[EvaluationResult] = []
+    for name in targets:
+        try:
+            results.append(
+                SIGNAL_REGISTRY[name](args.start, args.end, force_refresh=args.refresh)
+            )
+        except Exception as e:
+            logger.exception("Signal {} failed: {}", name, e)
+
+    # Print to stdout regardless.
+    for r in results:
+        print(f"\n=== {r.signal_name} ({r.frequency}) ===")
+        print(f"{'Horizon':<10} {'IC':>10} {'ICIR':>10} {'Hit':>10} {'Sharpe':>10} {'N':>8}")
+        for horizon, m in r.rows:
+            print(
+                f"{horizon:<10} "
+                f"{m.ic_mean:>10.4f} "
+                f"{m.icir:>10.4f} "
+                f"{m.hit_rate:>10.4f} "
+                f"{m.signal_sharpe:>10.4f} "
+                f"{m.n_observations:>8}"
+            )
+
+    if not args.no_report and results:
+        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        report = render_report(results, args.start, args.end)
+        REPORT_PATH.write_text(report, encoding="utf-8")
+        logger.info("Report written: {}", REPORT_PATH)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
