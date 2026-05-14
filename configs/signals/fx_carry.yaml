@@ -1,24 +1,58 @@
+# FX Carry signal — Stage 1 / Milestone 5.5
+#
+# Cross-sectional carry across G10 currencies, anchored on USD.
+# 7 currencies → 6 pairs after USD-anchoring (vs the pre-5.5 4-pair
+# bilateral scheme that double-counted positions).
+#
+# Returns are constructed from Yahoo spot pairs (XXXUSD=X for USD-quote;
+# USDXXX=X for USD-base) directly — no negation tricks.
+#
+# Rate series are 3-month interbank rates from FRED. Note: FRED EUR/GBP/AUD/
+# NZD/CAD/JPY/CHF interbank rate series are MONTHLY frequency (not daily),
+# which is why the signal frequency is `monthly` rather than `daily`. Daily
+# rate data for non-USD currencies will be added in Stage 2 / Phase 7.2
+# (Bloomberg or equivalent).
+
 signal:
   name: fx_carry
   asset_class: fx
   signal_type: carry
-  frequency: daily
+  frequency: monthly
 
 parameters:
+  base_currency: USD
+  lookback_smooth: 1
+  n_long: 2
+  n_short: 2
   rate_series:
     USD: DFF
     EUR: IR3TIB01EZM156N
     GBP: IR3TIB01GBM156N
-  lookback_smooth: 1
-  n_long: 2
-  n_short: 2
+    AUD: IR3TIB01AUM156N
+    NZD: IR3TIB01NZM156N
+    CAD: IR3TIB01CAM156N
+    JPY: IR3TIB01JPM156N
+    CHF: IR3TIB01CHM156N
 
 data_requirements:
   - DFF
   - IR3TIB01EZM156N
   - IR3TIB01GBM156N
+  - IR3TIB01AUM156N
+  - IR3TIB01NZM156N
+  - IR3TIB01CAM156N
+  - IR3TIB01JPM156N
+  - IR3TIB01CHM156N
 
 known_limitations:
-  - "Rate differential proxies forward premium — approximation only"
-  - "Does not include actual FX rollover costs"
-  - "EUR and GBP rates are monthly frequency from FRED — forward filled to daily"
+  - "Carry computed from 3-month interbank rates, not actual forward points;
+     a true carry signal uses forward-spot basis (covered-interest-parity-implied
+     carry). Rate-differential proxy is the standard academic approximation."
+  - "Non-USD FRED rate series are monthly frequency only. Daily rate data
+     needed for daily carry rebalancing; Stage 2 / Phase 7.2 will introduce
+     Bloomberg-sourced daily rates."
+  - "No transaction costs or bid/ask spread modelled. Realistic FX carry
+     after costs is materially lower than gross signal IC."
+  - "Yahoo Finance FX data quality is approximate (mid-rate, no adjustments
+     for weekend gaps or off-hours liquidity). Stage 2 / Phase 7.2 will move
+     to higher-quality FX data."

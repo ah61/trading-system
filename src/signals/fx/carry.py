@@ -107,6 +107,7 @@ class FXCarrySignal(Signal):
                 "n_long": int(params.get("n_long", 3)),
                 "n_short": int(params.get("n_short", 3)),
                 "rate_series": dict(rate_series) if isinstance(rate_series, dict) else {},
+                "base_currency": str(params.get("base_currency", "USD")),
             },
             required_data=required_data,
             known_limitations=known_limitations,
@@ -127,9 +128,38 @@ class FXCarrySignal(Signal):
         return s.sort_index()
 
     @staticmethod
-    def _iter_pairs(currencies: Iterable[str]) -> list[tuple[str, str]]:
+    def _iter_pairs(currencies: Iterable[str], base: str = "USD") -> list[tuple[str, str]]:
+        """Construct currency pairs anchored on a common base currency.
+
+        Standard cross-sectional carry uses one base currency (usually USD) and
+        ranks all *other* currencies' carry vs that base. For 7 currencies
+        including the base, this returns 6 pairs of the form ``(ccy, base)``.
+
+        Previously this returned every ordered pair ``(a, b) for a != b``, which
+        double-counted positions (USD/EUR and EUR/USD encode the same trade)
+        and inflated apparent cross-section breadth. Milestone 5.5 fixed this.
+
+        Pair naming convention: ``(quote, base)`` so ``("EUR", "USD")`` →
+        the EUR/USD pair, which means "long EUR, short USD". A positive carry
+        differential ``rate[quote] - rate[base]`` signals "go long this pair".
+
+        Args:
+            currencies: All currencies in the universe, including the base.
+            base: The anchor currency (default ``"USD"``).
+
+        Returns:
+            List of ``(quote, base)`` tuples for every non-base currency.
+
+        Raises:
+            ValueError: If the base is not in ``currencies``.
+        """
         cur = [str(c) for c in currencies]
-        return [(a, b) for a in cur for b in cur if a != b]
+        if base not in cur:
+            raise ValueError(
+                f"base currency {base!r} not in universe {cur!r}. "
+                "FX Carry needs the base currency's rate series."
+            )
+        return [(ccy, base) for ccy in cur if ccy != base]
 
     def compute(self, data: Dict[str, pd.DataFrame]) -> pd.Series:
         """Compute the FX carry signal (cross-sectional ranks) for configured currency pairs.
@@ -163,17 +193,20 @@ class FXCarrySignal(Signal):
         if len(rates_by_ccy) < 2:
             raise ValueError("Need at least 2 currencies to form FX pairs.")
 
-        pairs = self._iter_pairs(rates_by_ccy.keys())
+        base_currency = str(self.params.get("base_currency", "USD"))
+        pairs = self._iter_pairs(rates_by_ccy.keys(), base=base_currency)
 
         # Enforce no-lookahead: use only information available at time t by shifting inputs.
         shifted_rates = {ccy: s.shift(1) for ccy, s in rates_by_ccy.items()}
 
         diffs: dict[str, pd.Series] = {}
-        for base, quote in pairs:
-            diff = shifted_rates[base].sub(shifted_rates[quote])
+        for quote, base in pairs:
+            # Carry differential for "long quote / short base": positive when
+            # the quote currency has the higher interest rate.
+            diff = shifted_rates[quote].sub(shifted_rates[base])
             if lookback > 1:
                 diff = diff.rolling(window=lookback, min_periods=lookback).mean()
-            pair_name = f"{base}/{quote}"
+            pair_name = f"{quote}/{base}"
             diffs[pair_name] = diff
 
         diff_df = pd.DataFrame(diffs).sort_index()
