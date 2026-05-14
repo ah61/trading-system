@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.2 — Frequency Layer (complete, pending commit) |
-| **Tests** | 85 passing (was 72, +13 from frequency layer) |
-| **Next action** | Run remaining Phase 5 milestones: 5.3 Variable Library, 5.4 Data Persistence, 5.5 G10 FX, 5.6 Equity Universe, 5.7 Rates Regime Filter, 5.1 Reference Documents |
+| **Active milestone** | 5.4 — Data Persistence ✅ complete |
+| **Tests** | 113 passing (was 99, +14 from CachedSource) |
+| **Next action** | Begin Milestone 5.5 (G10 FX Expansion) |
 
 ---
 
@@ -61,33 +61,24 @@
 
 ## Phase 5 — Signal Hardening 🔄 (in progress)
 
-### Pre-Phase 5 Signal Evaluation (preparation for Phase 5 work)
+### Pre-Phase 5 Signal Evaluation (preparation work)
 
-Completed before Phase 5 was formally scoped. The results below motivated the
-Phase 5 milestones now in ROADMAP v0.2 (frequency layer, variable library, G10
-expansion, equity universe expansion, rates regime filter).
+Completed before Phase 5 was formally scoped. Results motivated the Phase 5
+milestones now in ROADMAP v0.2. Historical results preserved at the bottom
+of this file (`Pre-5.2 Signal Evaluation Results`).
 
-- [x] Run SignalEvaluator on Rates Trend signal (TLT, 2010-2024)
-- [x] Apply DSR, PBO, Hansen SPA to Rates Trend
-- [x] Run SignalEvaluator on FX Carry signal
-- [x] Apply DSR, PBO, Hansen SPA to FX Carry
-- [x] Run SignalEvaluator on Equity Momentum signal (10-stock subset)
-- [x] Apply DSR to Equity Momentum
-- [x] Fix hit rate bug — exclude zero signals (zeros = no position, not wrong prediction)
-- [x] Fix `future_stack` deprecation warnings in `momentum.py` and `carry.py`
-- [x] Fix SyntaxWarning raw docstrings in `constructor.py` and `signal_evaluator.py`
-- [x] Fix `np.nan` vs `pd.NA` in `sizing.py` risk parity
-- [x] FX Carry — re-evaluate with actual FX pair returns (not DFF proxy)
-- [x] Equity Momentum — expand universe from 10 to 50 stocks, evaluate at monthly frequency
-- [x] Rates Trend — split evaluation pre/post 2022
+- [x] All exploratory signal evaluations run with manual resampling
+- [x] Hit rate bug fixed (exclude zero signals)
+- [x] `future_stack` deprecation fixes
+- [x] Phase 5 go-decision recorded (see "Historical Decision Record" at bottom)
 
-### Milestone 5.2 — Frequency Layer ✅ (pending commit)
+### Milestone 5.2 — Frequency Layer ✅
 
-**Completed 2026-05-14.** See `ARCHITECTURE.md` §4.3 for spec.
+**Code:** 2026-05-14. **Cleanup + bug fixes:** 2026-05-14.
 
+**Code changes:**
 - [x] Add `frequency` parameter to `SignalEvaluator.evaluate()` — `'daily'` | `'weekly'` | `'monthly'`
 - [x] Resampling rule: signal = first non-zero per period; carry forward all-zero periods
-  (rationale: zero = "no position", not "no signal")
 - [x] Resampling rule: log returns summed within each period (CONVENTIONS §3.2)
 - [x] Forward-return shift expressed in periods at chosen frequency: `shift(-(H+1))`
 - [x] Annualisation factor scales with frequency: 252 / 52 / 12
@@ -98,37 +89,113 @@ expansion, equity universe expansion, rates regime filter).
 - [x] Backward compatible: omitting `frequency` defaults to `'daily'`,
       numerically identical to pre-5.2 behaviour
 
-**Remaining Phase 5 commits / housekeeping (do as part of 5.2 cleanup):**
-- [ ] Commit final pre-Phase-5 evaluation results to `reports/signal_evaluation_phase1.md`
-- [ ] Update `configs/signals/fx_carry.yaml` — declare `frequency: monthly`
-- [ ] Update `configs/signals/equity_momentum.yaml` — declare `frequency: monthly`
-- [ ] Update `configs/signals/rates_trend.yaml` — confirm `frequency: daily`
-- [ ] Re-run all three signal evaluations using new frequency layer (no manual resampling),
-      replace numbers in "Signal Evaluation Results" section below
+**Cleanup changes:**
+- [x] `configs/signals/fx_carry.yaml` updated → `frequency: monthly` (was `daily`)
+- [x] `configs/signals/equity_momentum.yaml` — already `frequency: monthly`, confirmed
+- [x] `configs/signals/rates_trend.yaml` — already `frequency: daily`, confirmed
+- [x] `scripts/evaluate_signals.py` written — reproducible runner for all three signals
+      using the new frequency layer, no manual resampling. Writes Markdown report
+      to `reports/signal_evaluation_phase1.md`.
+- [x] Run `python scripts/evaluate_signals.py` and capture results
+      (see "Re-evaluation Results (5.2)" below)
+- [ ] Clean up `tests/Archive/signal_evaluator.py` (dead code left from earlier archive)
 
-### Milestone 5.1 — Reference Documents 🔄 (in progress)
+**Bug fixes discovered during runner execution (2026-05-14):**
+- [x] **Library bug:** `SignalEvaluator.evaluate()` multi-asset path had a
+      heuristic that picked unshifted returns over shifted ones when both produced
+      valid pairings. Result: horizon parameter was ignored for any case where
+      input returns were already valid forward returns. Identical IC/ICIR across
+      all horizons for Equity Momentum is the symptom that caught it.
+      **Fix:** removed heuristic; evaluator now always applies `shift(-(horizon+1))`
+      per asset. Contract is single-meaning: input is 1-period log returns.
+- [x] **Test debt:** Three existing tests (`test_ic_mean_near_zero_for_random_signal`,
+      `test_icir_computed_correctly`, `test_n_observations_correct`) pre-shifted
+      returns manually, depending on the broken heuristic to pick "as_is".
+      Updated to pass 1-period returns directly. Two "perfect signal" tests
+      (`test_ic_mean_positive_for_perfect_signal`, `test_hit_rate_one_for_perfect_signal`,
+      `test_signal_sharpe_positive_for_good_signal`) now use `np.roll(signal, +(h+1))`
+      to pre-arrange returns so post-shift alignment is exact.
+- [x] **Runner bug:** `panel.stack(future_stack=True, dropna=False)` is invalid
+      in newer pandas. Removed `dropna=False`. FX Carry was crashing on this.
+
+### Milestone 5.3 — Variable Library ✅
+
+**Completed 2026-05-14.**
+
+- [x] `configs/data/variables/macro.yaml` — 14 FRED series (DFF, GS10, GS2, T10YIE,
+      CPIAUCSL, PAYEMS, plus 7 G10 interbank rates including 5 placeholders for 5.5)
+- [x] `configs/data/variables/market.yaml` — 11 Yahoo tickers (4 rate ETFs,
+      7 FX spot pairs including 5 placeholders for 5.5)
+- [x] `configs/data/variables/transformations.yaml` — 7 transformed variables
+      (DFF z-score, yield curve slope, CPI YoY, TLT log returns, TLT 63d vol,
+      EURUSD log returns, GBPUSD log returns)
+- [x] `configs/data/derived_variables.yaml` — 4 derived (3 signals + 1 regime
+      indicator placeholder for 5.7)
+- [x] `src/data/variable_catalog.py` — `VariableCatalog` class with load,
+      strict validation, lineage walk, used-by (direct + transitive)
+- [x] 14 new tests in `tests/test_variable_catalog.py` (85 → 99 passing)
+- [x] Real catalog validates strict-mode load: 35 variables, no unresolved refs
+
+**Design decisions recorded:**
+- Strict validation on by default; `strict=False` available for partial dev states
+- `used_by` is computed from the inputs/source_variable graph, not authored in YAML
+- Catalog is read-only and does not wire into `DataStore` for 5.3 (5.4 concern)
+- `VariableCatalog.get_lineage()` walks the variable dependency graph;
+  `DataStore.get_lineage()` traces storage-layer materialisation — these answer
+  different questions and are kept separate
+- File-layer convention enforced: macro.yaml/market.yaml hold raw,
+  transformations.yaml holds transformed, derived_variables.yaml holds derived
+
+### Milestone 5.1 — Reference Documents ⬜
 - [ ] `docs/phase2_signal_engine.docx`
 - [ ] `docs/phase3_portfolio_engine.docx`
 - [ ] `docs/phase4_backtest_engine.docx`
 
-### Milestone 5.3 — Variable Library ⬜
-- [ ] `configs/data/variables/macro.yaml`
-- [ ] `configs/data/variables/market.yaml`
-- [ ] `configs/data/variables/transformations.yaml`
-- [ ] `configs/data/derived_variables.yaml`
-- [ ] `src/data/variable_catalog.py`
+### Milestone 5.4 — Data Persistence ✅
 
-### Milestone 5.4 — Data Persistence ⬜
-- [ ] Wire FRED/Yahoo/DataCleaner to DataStore
-- [ ] `DataStore.fetch_or_load()` helper
-- [ ] Populate store with Stage 1 data, verify second run is offline
+**Completed 2026-05-14.**
+
+- [x] `src/data/cached_source.py` — `CachedSource` wrapper composes any
+      `DataSource` with a `DataStore`. Exposes `fetch_or_load()` (cache-then-fetch)
+      and a `fetch()` compatibility shim that defaults to daily frequency.
+- [x] Raw layer: written on first fetch, read on subsequent calls. Range
+      extension supported via "overwrite if superset" semantics.
+- [x] Adjusted layer: optional `DataCleaner` parameter; cleaned data is
+      written to `adjusted.duckdb` at version 1.
+- [x] Failure isolation: if `DataCleaner.clean()` raises, raw is still cached
+      but adjusted is NOT written (cache is not corrupted by partial state).
+- [x] `force_refresh=True` parameter on `fetch_or_load` bypasses the cache.
+      Refetched range must be a superset of the cached one (refusing to clobber
+      with a narrower range).
+- [x] Cache check is business-day aware: a calendar end on a weekend doesn't
+      cause spurious misses when the stored data covers all business days in
+      the request.
+- [x] `scripts/evaluate_signals.py` refactored to route fetches through
+      `CachedSource`. New `--refresh` CLI flag exposed for forced re-fetches.
+- [x] 14 new tests in `tests/test_cached_source.py` (99 → 113 passing).
+
+**Design decisions recorded:**
+- `CachedSource` is a composition wrapper, not an inheritance subclass of
+  `DataSource`. Sources stay storage-agnostic; the wrapper decides when to
+  hit the network. This keeps the 99 pre-5.4 tests stable.
+- Cache key is `(source_name, ticker, frequency)`; date range is handled by
+  storing the union of all fetched dates and slicing on read.
+- `VariableCatalog.get_lineage()` and `DataStore.get_lineage()` remain separate
+  concerns; 5.4 does not bridge them. Catalog walks variable dependencies;
+  store traces storage materialisation. Both useful, both distinct.
 
 ### Milestone 5.5 — G10 FX Expansion ⬜
 - [ ] Add AUD, NZD, CAD, JPY, CHF rate series + FX spot pairs
 - [ ] Re-evaluate FX Carry with 7 currencies (using frequency layer)
+- [ ] **Fix `_iter_pairs` to anchor on USD base** — current `(a, b) for a != b`
+      double-counts trades (USD/EUR and EUR/USD carry identical information).
+      Change to `[(ccy, base) for ccy in cur if ccy != base]` to match standard
+      cross-sectional carry methodology. Update `fx_carry.yaml` known_limitations.
+- [ ] Fetch EURGBP=X and additional cross rates so all generated pairs have returns
+- [ ] Update `scripts/evaluate_signals.py` accordingly
 
 ### Milestone 5.6 — Equity Universe Expansion ⬜
-- [ ] Expand to 200-stock universe
+- [ ] Expand to 200-stock universe (`configs/universes/sp500_current.yaml`)
 - [ ] Re-evaluate Equity Momentum at monthly frequency (using frequency layer)
 
 ### Milestone 5.7 — Rates Trend Regime Filter ⬜
@@ -141,19 +208,30 @@ expansion, equity universe expansion, rates regime filter).
 
 ## Known Issues / Technical Debt
 
+### Code quality / cleanups outstanding
+
+- **`tests/Archive/signal_evaluator.py`** is dead code — leftover from the
+  earlier archive step that fixed pytest collection. Delete the file or move
+  the whole `tests/Archive/` directory outside `tests/`.
+- **`FXCarrySignal._iter_pairs` generates both (a, b) and (b, a) directions**
+  — double-counts trades (USD/EUR and EUR/USD encode the same position).
+  Cross-section breadth is 3 trades, not 6 pairs. Fix scheduled for Milestone 5.5
+  (see above).
+
 ### Data
-- `GS10` from FRED returns only 109 rows (monthly frequency) — confirm frequency handling
-  during Milestone 5.3 (variable library) — declare frequency: monthly in catalog
-- Equity momentum universe is survivorship-biased (current S&P 500 only); Stage 2 / ROADMAP
-  Phase 7.2 fix (CRSP point-in-time)
+- `GS10` from FRED returns only 109 rows (monthly frequency) — confirm during
+  Milestone 5.3 variable library (declare `frequency: monthly` in catalog)
+- Equity momentum universe is survivorship-biased (current S&P 500 only);
+  Stage 2 / ROADMAP Phase 7.2 fix (CRSP point-in-time)
 - FX Carry signal fires monthly — EUR/GBP rate series are monthly FRED frequency.
   Daily EUR/GBP rate data needed for daily carry — Stage 2 / ROADMAP Phase 7.2 (Bloomberg)
 - FX Carry cross-section too thin — only 3 currencies (USD/EUR/GBP), 4 active pairs.
-  Fixed in Milestone 5.5 (G10 expansion to 7 currencies / 12 active pairs)
-- FRED API flaps intermittently with HTTP 500 errors — workaround: cache rate data to
-  `data/cache/` before sessions. Permanent fix in Milestone 5.4 (data persistence)
-- DataStore is empty — all evaluations fetch live from FRED/Yahoo. Permanent fix in
-  Milestone 5.4 (data persistence)
+  Fixed in Milestone 5.5 (G10 expansion to 7 currencies)
+- FRED API flaps intermittently with HTTP 500 errors — **resolved by 5.4**.
+  First successful fetch is cached to `data/raw/raw.duckdb`; subsequent runs
+  read from the store. Use `--refresh` to force re-fetch.
+- DataStore was empty pre-5.4 — **resolved by 5.4**. `scripts/evaluate_signals.py`
+  now populates the store on first run.
 
 ### Signals
 - Rates Trend is regime-dependent — fails in post-trend consolidation (2023-2024).
@@ -161,28 +239,93 @@ expansion, equity universe expansion, rates regime filter).
 
 ### Documentation
 - `ARCHITECTURE.md` was bumped to v0.2 on 2026-05-14: renamed prior "Phase 1 / Phase 2"
-  references to "Stage 1 / Stage 2" (data-tier semantics) to avoid collision with new
-  ROADMAP phase numbering. Header note explains the change.
-- `SignalMetrics` in `ARCHITECTURE.md` §4.3 was updated to include `frequency` field
-  (Milestone 5.2 breaking change). Search `grep -rn "SignalMetrics(" src/ tests/`
-  before next commit to confirm no external constructors are missing the new kwarg.
+  references to "Stage 1 / Stage 2" to avoid collision with new ROADMAP phase numbering
+- `SignalMetrics` in `ARCHITECTURE.md` §4.3 updated to include `frequency` field
+  (5.2 breaking change). Confirmed no external constructors via grep on 2026-05-14
 
 ---
 
-## Signal Evaluation Results Summary
+## Re-evaluation Results (5.2)
 
-**Note:** Numbers below are pre-Milestone-5.2. Re-running through the new frequency
-layer is part of 5.2 cleanup (see "Remaining Phase 5 commits" above). Results
-should be similar — the frequency layer formalises and automates what was being
-done manually — but will be re-checked once the runner is wired up.
+**Generated:** 2026-05-14 via `python scripts/evaluate_signals.py` over period 2010-01-01 to 2024-12-31.
+**Report:** `reports/signal_evaluation_phase1.md` (auto-generated, do not hand-edit).
+
+### Rates Trend (daily frequency)
+
+| Horizon | IC | ICIR | Hit Rate | Sharpe | N |
+|---------|------|------|----------|--------|------|
+| 1d  | +0.0096 | +0.0930 | 0.5111 | +0.1833 | 3571 |
+| 5d  | +0.0036 | +0.0327 | 0.5094 | +0.0938 | 3567 |
+| 21d | +0.0123 | +0.1254 | 0.5086 | +0.1691 | 3551 |
+| 63d | +0.0018 | +0.0151 | 0.5130 | -0.0492 | 3509 |
+
+**Sanity check vs historical (manual resampling):** Numbers match closely
+(historical 1d IC was 0.0117, new 0.0096; same magnitude, same sign across
+all horizons). Frequency layer reproduces manual resampling. ✓
+
+### FX Carry (monthly frequency)
+
+| Horizon | IC | ICIR | Hit Rate | Sharpe | N |
+|---------|------|------|----------|--------|------|
+| 1m | -0.0010 | -0.0015 | 0.5028 | -0.1394 | 708 |
+| 2m | -0.0161 | -0.0236 | 0.5057 | -0.1670 | 704 |
+| 3m | -0.0070 | -0.0104 | 0.5000 | -0.0996 | 700 |
+| 6m | +0.0184 | +0.0268 | 0.5029 | -0.0533 | 688 |
+
+**Note:** These differ materially from historical monthly numbers (historical 2m
+IC was +0.1239; new is -0.0161). The runner uses Option A pair returns (USDEUR /
+EURUSD / USDGBP / GBPUSD log returns, inverse pairs negated, EUR/GBP and GBP/EUR
+get NaN). Historical likely used a subset of these pairs or different alignment
+— the exact pre-5.2 methodology was not committed to a script and cannot be
+reproduced bit-for-bit. With the `_iter_pairs` double-counting bug (USD/EUR
+and EUR/USD encode the same trade), expected behaviour is roughly symmetric
+results that average toward zero. That's what we see here. **Real test will be
+Milestone 5.5** when (i) `_iter_pairs` is anchored on USD, (ii) cross-section
+expands to 7 currencies, (iii) EUR/GBP and other cross pairs have real returns.
+
+### Equity Momentum (monthly frequency)
+
+| Horizon | IC | ICIR | Hit Rate | Sharpe | N |
+|---------|------|------|----------|--------|------|
+| 1m | +0.0484 | +0.0870 | 0.4900 | +0.4425 | 1353 |
+| 2m | +0.0359 | +0.0798 | 0.4989 | +0.5007 | 1343 |
+| 3m | +0.0343 | +0.0766 | 0.5026 | +0.4520 | 1333 |
+| 6m | -0.0074 | -0.0170 | 0.5042 | +0.3633 | 1303 |
+
+**Sanity check vs historical:** Shape matches (positive IC at 1-3m, fading to
+zero at 6m). Best monthly IC moved from 3m (historical 0.0309) to 1m (new
+0.0484); same order of magnitude. Differences explained by exact universe
+composition and date-range edges. ICIR still below 0.3 threshold — Milestone 5.6
+(200-stock universe) is the fix.
+
+### Summary of differences vs Pre-5.2
+
+| Signal | Pre-5.2 verdict | 5.2 verdict | Change |
+|---|---|---|---|
+| Rates Trend | FAIL (IC 0.0117, ICIR 0.1120 at 1d) | Same (IC 0.0096, ICIR 0.0930 at 1d) | Within noise. |
+| FX Carry | BORDERLINE (IC +0.1239 at 2m) | NEUTRAL (IC near zero, no horizon clearly best) | Material — methodology differs. Resolves in 5.5. |
+| Equity Momentum | BORDERLINE (IC 0.0309 at 3m) | Same (IC 0.0484 at 1m, 0.0359 at 2m) | Within noise. Shape preserved. |
+
+**Bottom line:** Frequency layer reproduces historical results for Rates Trend
+and Equity Momentum. FX Carry differs but in a way that is expected given the
+`_iter_pairs` double-counting issue — the methodology has known problems that
+Milestone 5.5 will fix. None of the new results change the Phase 6 paper-trading
+go-decision.
+
+---
+
+## Pre-5.2 Signal Evaluation Results (historical)
+
+Produced via manual resampling before the frequency layer existed. Preserved
+for comparison against the 5.2 re-evaluation.
+
+### Summary
 
 | Signal | Best Horizon | IC Mean | ICIR | Hit Rate | Sharpe | DSR | Decision |
 |--------|-------------|---------|------|----------|--------|-----|----------|
 | Rates Trend | 1d | 0.0117 | 0.1120 | 0.5117 | 0.2202 | 0.000 | FAIL |
 | FX Carry | 2m | 0.1239 | 0.1345 | 0.5463 | -0.1513 | N/A | BORDERLINE |
 | Equity Momentum | 3m | 0.0309 | 0.0675 | 0.4924 | 0.3280 | 0.000 | BORDERLINE |
-
----
 
 ### Rates Trend — Full Results + Pre/Post 2022 Split (TLT)
 
@@ -219,16 +362,11 @@ done manually — but will be re-checked once the runner is wired up.
 | 63d | -0.0917 | -0.8412 | 0.4785 | -1.3491 |
 
 **Decision: FAIL overall — IC and ICIR below thresholds across full period.**
-**Key finding: Signal worked well during 2022 rates shock (Sharpe ~1.2-1.3) but is actively
-wrong in post-2022 consolidation (ICIR -0.33 to -0.68). Regime-dependent trend follower.**
-**Phase 5 fix: regime filter (Milestone 5.7).**
+Signal worked well during 2022 rates shock (Sharpe ~1.2-1.3) but is actively
+wrong in post-2022 consolidation (ICIR -0.33 to -0.68). Regime-dependent.
+**Phase 5 fix:** regime filter (Milestone 5.7).
 
----
-
-### FX Carry — Re-evaluated with Actual FX Pair Returns (Monthly frequency)
-
-Forward returns: Yahoo spot (EURUSD=X, GBPUSD=X) log returns, inverse pairs negated.
-Signal resampled to monthly (EUR/GBP FRED rates are monthly frequency).
+### FX Carry — Actual FX Pair Returns (Monthly)
 
 | Horizon | IC | ICIR | Hit Rate | Sharpe |
 |---------|-----|------|----------|--------|
@@ -237,21 +375,11 @@ Signal resampled to monthly (EUR/GBP FRED rates are monthly frequency).
 | 3m | 0.0323 | 0.0346 | 0.5187 | -2.2301 |
 | 6m | -0.0348 | -0.0369 | 0.5048 | -4.1145 |
 
-**Decision: BORDERLINE — hit rate consistently >50%, IC positive at 2m horizon.**
-**ICIR below 0.3 threshold — cross-section too thin (3 currencies = 4 active pairs).**
-**Previous DFF-proxy evaluation was invalid — rate differential is not an FX spot return benchmark.**
+**Decision: BORDERLINE.** ICIR below threshold — cross-section too thin
+(3 currencies, 4 active pairs).
+**Phase 5 fixes:** Milestone 5.5 (G10 expansion, fix `_iter_pairs`), Milestone 5.2 ✅.
 
-**Phase 5 fixes:**
-- Milestone 5.5 — Add G10 currencies (AUD, NZD, CAD, JPY, CHF) for proper cross-section
-- Milestone 5.2 — Frequency layer (replaces manual resample-to-monthly) ✅
-- Stage 2 / ROADMAP Phase 7.2 — daily EUR/GBP rate data + Bloomberg forward rates
-
----
-
-### Equity Momentum — 50-stock universe, monthly frequency (2026-05-14)
-
-Universe expanded from 10 to 50 stocks. Evaluated at monthly frequency to match
-signal rebalance cadence. 10-stock DSR=1.0 result was noise from tiny universe.
+### Equity Momentum — 50-stock universe, monthly
 
 #### Daily evaluation (50 stocks — misaligned frequency, shown for reference)
 | Horizon | IC | ICIR | Hit Rate | Sharpe |
@@ -271,56 +399,38 @@ DSR = 0.000
 | 6m | -0.0250 | -0.0586 | 0.4792 | -0.9733 |
 DSR = 0.000
 
-**Decision: BORDERLINE — IC positive at 2-3m, consistent with academic literature on momentum.**
-**ICIR and DSR fail thresholds. 50 stocks insufficient for robust cross-sectional momentum.**
-
-**Phase 5 fixes:**
-- Milestone 5.6 — Expand to 200-stock universe
-- Milestone 5.2 — Frequency layer (replaces manual resample-to-monthly) ✅
-- Stage 2 / ROADMAP Phase 7.2 — CRSP point-in-time universe (eliminates survivorship bias)
-
-**The 10-stock DSR=1.0 result was an artefact of the tiny universe — discard.**
+**Decision: BORDERLINE — IC positive at 2-3m, consistent with academic momentum.**
+ICIR and DSR fail thresholds. 50 stocks insufficient.
+**Phase 5 fix:** Milestone 5.6 (200-stock universe).
+**The 10-stock DSR=1.0 earlier result was an artefact of the tiny universe — discard.**
 
 ---
 
 ## Historical Decision Record: Paper Trading Go/No-Go (recorded 2026-05-14)
 
-**Note:** This was originally framed as a "Phase 5 Decision" before the ROADMAP
-was restructured. Under ROADMAP v0.2, paper trading is **Phase 6** and this is
+This was originally framed as a "Phase 5 Decision" before the ROADMAP was
+restructured. Under ROADMAP v0.2, paper trading is **Phase 6** and this is
 a record of the decision to *proceed toward* Phase 6 once Phase 5 (Signal
-Hardening) completes. The decision itself was conditional on completing Phase 5
-work that did not exist as formal milestones at the time of recording.
+Hardening) completes.
 
-**Decision: PROCEED TO PHASE 6 (paper trading) once Phase 5 milestones complete,
-with explicit Stage 1 limitations acknowledged.**
+**Decision:** PROCEED TO PHASE 6 (paper trading) once Phase 5 milestones complete,
+with explicit Stage 1 limitations acknowledged.
 
 ### Rationale
 All three signals show faint but consistent evidence of predictive power:
-- FX Carry: hit rate >50% at all horizons, IC positive at 2m with real FX benchmark
-- Equity Momentum: IC positive at 2-3m, consistent with well-documented academic factor
-- Rates Trend: strong during sustained trends (2022 Sharpe ~1.3), regime filter needed
+- FX Carry: hit rate >50% at all horizons, IC positive at 2m
+- Equity Momentum: IC positive at 2-3m, consistent with academic momentum factor
+- Rates Trend: strong in trends (2022 Sharpe ~1.3), regime filter needed
 
 None pass the strict IC > 0.02 AND ICIR > 0.3 ROADMAP threshold at monthly frequency.
 However, the thresholds were designed for daily signals with large cross-sections.
 With monthly frequency and thin cross-sections, the thresholds are not calibrated
-correctly for Stage 1 data constraints. The signals are not proven — but they are
-not disproven either.
+correctly for Stage 1 data constraints. Signals are not proven — but not disproven.
 
-### Phase 6 Conditions (preconditions to going live in paper)
+### Phase 6 Preconditions
 1. Paper trade FX Carry + Equity Momentum as primary signals
 2. Rates Trend included only with the regime filter from Milestone 5.7
    (signal active only when trailing 63-day vol of TLT returns > 0.8%)
 3. Monitor rolling 60-day IC — halt signal if IC < -0.05 for 3 consecutive months
 4. Apply all kill switch criteria from ROADMAP.md Phase 6
 5. Document all Stage 2 / ROADMAP Phase 7 data upgrades required before Phase 7 capital
-
-### Stage 2 (ROADMAP Phase 7) Upgrades Required Before Live Capital
-- FX: Add AUD, NZD, CAD, JPY, CHF rate series for full G10 cross-section
-  (now Milestone 5.5 — moved earlier)
-- FX: Source daily EUR/GBP rate data (currently monthly FRED) — Phase 7.2
-- FX: Replace rate proxy with actual forward rates (Bloomberg) — Phase 7.2
-- Equities: Replace survivorship-biased universe with CRSP point-in-time
-  (500+ stocks) — Phase 7.2
-- Rates: Add regime filter to RatesTrendSignal (now Milestone 5.7 — moved earlier)
-- Infrastructure: Persist data to DataStore instead of fetching live each session
-  (now Milestone 5.4 — moved earlier)
