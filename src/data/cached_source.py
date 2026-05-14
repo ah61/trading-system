@@ -135,9 +135,33 @@ class CachedSource:
 
     # ----- internals ------------------------------------------------------
 
+    @staticmethod
+    def _sanitize_ticker(ticker: str) -> str:
+        """Sanitize a ticker for use as a DuckDB identifier.
+
+        `DataStore._validate_ident` enforces ``[A-Za-z0-9_]`` because identifiers
+        appear directly in SQL. Some real-world tickers contain ``=`` (Yahoo FX,
+        e.g. ``EURUSD=X``), ``-`` (BRK-B), ``.`` (ticker classes), or ``^``
+        (indices). Sanitisation here is one-way and only used for store keys;
+        the original ticker is still passed to the underlying source's
+        ``fetch()`` so the vendor sees what it expects.
+
+        Note: this mapping must be deterministic and collision-free for the
+        ticker set in use. If two distinct tickers were to sanitise to the same
+        store key, we'd have silent data crossover. The current mapping (=,-,.,^
+        → _) is collision-free for known Stage 1 tickers but should be
+        revisited if exotic symbols are added.
+        """
+        out = ticker
+        for bad in ("=", "-", ".", "^", "/"):
+            out = out.replace(bad, "_")
+        return out
+
     def _raw_table_name(self, ticker: str, frequency: str) -> str:
         # Reuse the store's table-name convention without poking at internals.
-        return self.store._raw_table_name(self.source_name, ticker, frequency)
+        return self.store._raw_table_name(
+            self.source_name, self._sanitize_ticker(ticker), frequency
+        )
 
     def _raw_covers_range(
         self, ticker: str, frequency: str, start: date, end: date
@@ -170,17 +194,33 @@ class CachedSource:
         cached_start = self._timestamp_to_utc_date(row[0])
         cached_end = self._timestamp_to_utc_date(row[1])
 
-        if cached_start > start:
-            return False
-
-        # Find the last business day in [start, end]. If `end` itself is a
-        # business day, that's it; otherwise step back to the previous one.
-        last_bday_in_range = pd.bdate_range(start=start, end=end)
-        if len(last_bday_in_range) == 0:
+        # Find the actual business days within [start, end]. The cache covers
+        # the request iff every business day in that range is at or after the
+        # cached start AND at or before the cached end. A calendar start/end
+        # that falls on a weekend or holiday should not cause spurious misses.
+        bdays_in_range = pd.bdate_range(start=start, end=end)
+        if len(bdays_in_range) == 0:
             # No business days requested at all — trivially covered.
             return True
-        required_end = last_bday_in_range[-1].date()
-        return cached_end >= required_end
+        required_start = bdays_in_range[0].date()
+        required_end = bdays_in_range[-1].date()
+
+        # Slack at both boundaries. ``pd.bdate_range`` returns Mon–Fri but does
+        # not exclude market holidays, so a "required" date can fall on a closed
+        # market day (e.g. Jan 1, July 4, Thanksgiving) where the source returns
+        # no data — and the cache correctly contains no data for that day. A
+        # strict boundary check then produces spurious misses every time a
+        # holiday lands within a few days of the request boundary.
+        #
+        # End: 1 day of slack covers the timezone storage offset that DuckDB
+        # applies (timestamptz stored in server-local tz can shift dates by 1).
+        # Start: up to 5 business days of slack covers New Year's, MLK Day,
+        # Christmas, and other multi-day market closures at year boundaries.
+        start_slack = pd.tseries.offsets.BDay(5)
+        end_slack_days = 1
+        start_threshold = (pd.Timestamp(required_start) + start_slack).date()
+        end_threshold = required_end - pd.Timedelta(days=end_slack_days).to_pytimedelta()
+        return cached_start <= start_threshold and cached_end >= end_threshold
 
     @staticmethod
     def _timestamp_to_utc_date(value: Any) -> date:
@@ -196,14 +236,15 @@ class CachedSource:
     def _read_from_store(
         self, ticker: str, frequency: str, start: date, end: date, *, layer: str
     ) -> pd.DataFrame:
+        safe_ticker = self._sanitize_ticker(ticker)
         if layer == "raw":
             df = self.store.read(
-                source=self.source_name, ticker=ticker, frequency=frequency, layer="raw"
+                source=self.source_name, ticker=safe_ticker, frequency=frequency, layer="raw"
             )
         else:
             df = self.store.read(
                 source=self.source_name,
-                ticker=ticker,
+                ticker=safe_ticker,
                 frequency=frequency,
                 layer="adjusted",
                 version="latest",
@@ -247,7 +288,7 @@ class CachedSource:
             self.store.write_adjusted(
                 cleaned_df,
                 source=self.source_name,
-                ticker=ticker,
+                ticker=self._sanitize_ticker(ticker),
                 frequency=frequency,
                 version=_ADJUSTED_DEFAULT_VERSION,
             )
@@ -302,7 +343,7 @@ class CachedSource:
         # Either the table didn't exist or we just dropped it. Use write_raw,
         # which is the documented write path and emits the structured log entry.
         try:
-            self.store.write_raw(df, self.source_name, ticker, frequency)
+            self.store.write_raw(df, self.source_name, self._sanitize_ticker(ticker), frequency)
         except StorageError as e:
             # Defensive: if write_raw still fails (e.g. concurrent writer),
             # surface the error rather than silently retry.

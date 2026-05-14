@@ -276,10 +276,79 @@ def test_non_superset_refetch_is_rejected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_cache_hit_when_calendar_start_is_holiday(tmp_path: Path) -> None:
+    """First request: calendar start Jan 1 2010 (holiday). FakeSource fills
+    business days only, so cached_start ends up Jan 4 (first B-day). Second
+    request with the same calendar start must hit, not refetch."""
+    cached, fake = _make_cached(tmp_path)
+    cached.fetch_or_load("AAA", date(2010, 1, 1), date(2024, 12, 31), frequency="daily")
+    cached.fetch_or_load("AAA", date(2010, 1, 1), date(2024, 12, 31), frequency="daily")
+    assert len(fake.calls) == 1
+
+
+def test_cache_miss_when_cached_start_too_late(tmp_path: Path) -> None:
+    """Slack at the start has a limit. If cached data only starts in mid-2010
+    but the user asks from Jan 2010, that's a real miss — refetch."""
+    cached, fake = _make_cached(tmp_path)
+    # First fetch: only mid-year.
+    cached.fetch_or_load("AAA", date(2010, 6, 1), date(2010, 12, 31), frequency="daily")
+    # Second fetch: wider range. Must refetch, not hit.
+    cached.fetch_or_load("AAA", date(2010, 1, 1), date(2010, 12, 31), frequency="daily")
+    assert len(fake.calls) == 2
+
+
 def test_fetch_shim_defaults_to_daily(tmp_path: Path) -> None:
     cached, fake = _make_cached(tmp_path)
     df = cached.fetch("AAA", date(2024, 1, 1), date(2024, 6, 30))
     assert len(df) > 0
     # Cache hit on second call confirms shim wrote with frequency='daily'.
     cached.fetch("AAA", date(2024, 1, 1), date(2024, 6, 30))
+    assert len(fake.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Business-day boundary handling
+# ---------------------------------------------------------------------------
+
+
+def test_cache_hit_when_calendar_start_is_weekend(tmp_path: Path) -> None:
+    """Jan 1 2010 is a Friday holiday for many markets; first business day of
+    the year is Jan 4. After a cached fetch with start=Jan 1, a subsequent
+    fetch with the same start must hit the cache, not refetch."""
+    cached, fake = _make_cached(tmp_path)
+    cached.fetch_or_load("AAA", date(2010, 1, 1), date(2010, 6, 30), frequency="daily")
+    cached.fetch_or_load("AAA", date(2010, 1, 1), date(2010, 6, 30), frequency="daily")
+    assert len(fake.calls) == 1
+
+
+def test_cache_hit_when_calendar_end_is_weekend(tmp_path: Path) -> None:
+    """End on Sunday — cached data only goes through Friday. Must still hit."""
+    cached, fake = _make_cached(tmp_path)
+    # 2024-06-30 is a Sunday; last B-day in range is 2024-06-28.
+    cached.fetch_or_load("AAA", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
+    cached.fetch_or_load("AAA", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
+    assert len(fake.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Ticker sanitisation (Yahoo FX, special chars)
+# ---------------------------------------------------------------------------
+
+
+def test_ticker_with_equals_caches(tmp_path: Path) -> None:
+    """Yahoo FX tickers contain '=' (e.g. EURUSD=X). DataStore validates
+    identifiers as [A-Za-z0-9_] only, so CachedSource must sanitise."""
+    cached, fake = _make_cached(tmp_path)
+    df = cached.fetch_or_load("EURUSD=X", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
+    assert len(df) > 0
+    # Second call must hit cache (sanitisation must be deterministic).
+    cached.fetch_or_load("EURUSD=X", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
+    assert len(fake.calls) == 1
+
+
+def test_ticker_with_dash_caches(tmp_path: Path) -> None:
+    """E.g. BRK-B. Same sanitisation path."""
+    cached, fake = _make_cached(tmp_path)
+    cached.fetch_or_load("BRK-B", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
+    cached.fetch_or_load("BRK-B", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
     assert len(fake.calls) == 1
