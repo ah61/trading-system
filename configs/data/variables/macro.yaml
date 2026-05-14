@@ -1,0 +1,151 @@
+# Macro variables — FRED series.
+#
+# Schema per entry:
+#   <NAME>:
+#     domain: macro
+#     layer: raw
+#     source: FRED
+#     series_id: <FRED series ID>
+#     description: <one-line human description>
+#     frequency: daily | monthly | quarterly
+#     unit: percent | index | thousands | ...
+#     use_alfred_vintage: true | false   # true = required for point-in-time backtests
+#
+# To add: see ARCHITECTURE.md §3.2 FREDSource and CONVENTIONS.md §4 for config format.
+# Names use UPPER_SNAKE_CASE; series_id is the literal FRED identifier.
+
+DFF:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: DFF
+  description: Federal Funds Effective Rate
+  frequency: daily
+  unit: percent
+  use_alfred_vintage: false
+
+GS10:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: GS10
+  description: 10-Year Treasury Constant Maturity Rate
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+GS2:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: GS2
+  description: 2-Year Treasury Constant Maturity Rate
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+T10YIE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: T10YIE
+  description: 10-Year Breakeven Inflation Rate
+  frequency: daily
+  unit: percent
+  use_alfred_vintage: false
+
+CPIAUCSL:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: CPIAUCSL
+  description: Consumer Price Index for All Urban Consumers (All Items)
+  frequency: monthly
+  unit: index
+  use_alfred_vintage: true
+
+PAYEMS:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: PAYEMS
+  description: Total Non-Farm Payroll Employment
+  frequency: monthly
+  unit: thousands
+  use_alfred_vintage: true
+
+# G10 interbank rates — used for FX Carry.
+# USD rate uses DFF above (DFF is daily; the EUR/GBP/etc series below are monthly).
+
+EUR_RATE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: IR3TIB01EZM156N
+  description: Euro Area 3-Month Interbank Rate
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+GBP_RATE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: IR3TIB01GBM156N
+  description: United Kingdom 3-Month Interbank Rate
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+# The following five G10 rates are planned for Milestone 5.5 (G10 FX expansion).
+# Series IDs verified against the planned-contents table in ROADMAP.md.
+
+AUD_RATE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: IR3TIB01AUM156N
+  description: Australia 3-Month Interbank Rate (planned for 5.5)
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+NZD_RATE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: IR3TIB01NZM156N
+  description: New Zealand 3-Month Interbank Rate (planned for 5.5)
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+CAD_RATE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: IR3TIB01CAM156N
+  description: Canada 3-Month Interbank Rate (planned for 5.5)
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+JPY_RATE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: IR3TIB01JPM156N
+  description: Japan 3-Month Interbank Rate (planned for 5.5)
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false
+
+CHF_RATE:
+  domain: macro
+  layer: raw
+  source: FRED
+  series_id: IR3TIB01CHM156N
+  description: Switzerland 3-Month Interbank Rate (planned for 5.5)
+  frequency: monthly
+  unit: percent
+  use_alfred_vintage: false

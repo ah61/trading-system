@@ -1,0 +1,83 @@
+# Transformed variables — computed from raw or other transformed variables.
+#
+# Schema per entry:
+#   <NAME>:
+#     domain: macro | market
+#     layer: transformed
+#     source_variable: <NAME of raw or transformed variable>  # OR sources: [list]
+#     transformation: rolling_zscore | difference | yoy_pct_change | log_return | rolling_vol | ...
+#     window: <int>        # required for rolling transformations
+#     description: <one-line human description>
+#     frequency: daily | monthly | quarterly
+#     # Optional:
+#     annualised: true | false   # for rolling_vol etc.
+#
+# Conventions:
+#   - source_variable references must match a NAME defined in macro.yaml, market.yaml,
+#     or this file. The catalog loader validates this.
+#   - For transformations that take multiple inputs (e.g. GS10 - GS2 slope), use
+#     `sources:` (a list) and document the operation in `description`.
+
+DFF_ZSCORE_252:
+  domain: macro
+  layer: transformed
+  source_variable: DFF
+  transformation: rolling_zscore
+  window: 252
+  description: DFF rolling 252-day z-score
+  frequency: daily
+
+GS10_GS2_SLOPE:
+  domain: macro
+  layer: transformed
+  sources: [GS10, GS2]
+  transformation: difference
+  description: Yield curve slope (GS10 - GS2)
+  frequency: monthly
+
+CPI_YOY:
+  domain: macro
+  layer: transformed
+  source_variable: CPIAUCSL
+  transformation: yoy_pct_change
+  description: CPI year-on-year percentage change
+  frequency: monthly
+
+# TLT-derived transformations.
+TLT_LOG_RET:
+  domain: market
+  layer: transformed
+  source_variable: TLT_CLOSE
+  transformation: log_return
+  window: 1
+  description: TLT daily log returns
+  frequency: daily
+
+TLT_VOL_63D:
+  domain: market
+  layer: transformed
+  source_variable: TLT_LOG_RET
+  transformation: rolling_vol
+  window: 63
+  description: TLT rolling 63-day realised volatility (annualised)
+  frequency: daily
+  annualised: true
+
+# FX spot log returns (used in evaluation and in future signals).
+EURUSD_LOG_RET:
+  domain: market
+  layer: transformed
+  source_variable: EURUSD
+  transformation: log_return
+  window: 1
+  description: EUR/USD daily log returns
+  frequency: daily
+
+GBPUSD_LOG_RET:
+  domain: market
+  layer: transformed
+  source_variable: GBPUSD
+  transformation: log_return
+  window: 1
+  description: GBP/USD daily log returns
+  frequency: daily

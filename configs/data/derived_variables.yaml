@@ -1,0 +1,72 @@
+# Derived variables — signals and regime indicators.
+#
+# Schema per entry:
+#   <NAME>:
+#     layer: derived
+#     type: signal | regime_indicator
+#     inputs: [<NAME>, ...]    # variables from macro.yaml, market.yaml, or transformations.yaml
+#     script: <path to compute logic>     # for signals
+#     rule: <expression>                  # for regime indicators
+#     description: <one-line human description>
+#     frequency: daily | weekly | monthly
+#     # Signal-only:
+#     output_range: [<lo>, <hi>]
+#     output_index: <"date" or "date,asset">   # informational
+#
+# Conventions:
+#   - input names must resolve through the catalog. Catalog validates strictly.
+#   - For signals, `script:` is the source file that defines the Signal subclass.
+#   - For regime indicators, `rule:` is a human-readable expression that documents
+#     the gating logic. The actual computation lives in the signal class for now;
+#     a generic rules engine is a future improvement.
+
+# ---------------------------------------------------------------------------
+# Signals — Phase 2 implementations
+# ---------------------------------------------------------------------------
+
+fx_carry_signal:
+  layer: derived
+  type: signal
+  # Note: USD's rate comes from DFF directly, not via the rate alias.
+  # EUR_RATE and GBP_RATE alias FRED's monthly interbank series.
+  inputs: [DFF, EUR_RATE, GBP_RATE]
+  script: src/signals/fx/carry.py
+  description: "Cross-sectional FX carry on G10 (Stage 1: USD/EUR/GBP only)"
+  frequency: monthly
+  output_range: [-1, 1]
+  output_index: "date,pair"
+
+rates_trend_signal:
+  layer: derived
+  type: signal
+  inputs: [TLT_CLOSE]
+  script: src/signals/rates/trend.py
+  description: SMA crossover trend signal on TLT (50/200 default)
+  frequency: daily
+  output_range: [-1, 1]
+  output_index: "date"
+
+equity_momentum_signal:
+  layer: derived
+  type: signal
+  # The equity universe is referenced by name; tickers are resolved at compute
+  # time via configs/universes/sp500_current.yaml. The catalog does not enumerate
+  # individual S&P 500 tickers as variables.
+  inputs: []
+  script: src/signals/equities/momentum.py
+  description: Cross-sectional 12-1 month equity momentum (S&P 500 subset)
+  frequency: monthly
+  output_range: [-1, 1]
+  output_index: "date,ticker"
+
+# ---------------------------------------------------------------------------
+# Regime indicators — placeholders for Milestone 5.7
+# ---------------------------------------------------------------------------
+
+regime_rates_trend:
+  layer: derived
+  type: regime_indicator
+  inputs: [TLT_VOL_63D]
+  rule: "1 if TLT_VOL_63D > 0.008 else 0"
+  description: "Rates trending regime gate (planned for 5.7). 1 = trending, 0 = choppy."
+  frequency: daily

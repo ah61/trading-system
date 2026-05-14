@@ -1,0 +1,129 @@
+# Market variables — Yahoo Finance and (later) Interactive Brokers tickers.
+#
+# Schema per entry:
+#   <NAME>:
+#     domain: market
+#     layer: raw
+#     source: yahoo | ib
+#     ticker: <vendor ticker>
+#     description: <one-line human description>
+#     frequency: daily
+#     instrument_type: etf | fx_spot | equity | index
+#     adjustment: auto_adjust | none
+#
+# Note on equity universes: the current S&P 500 list is survivorship-biased.
+# The universe definition lives in `configs/universes/sp500_current.yaml` and
+# is referenced by signals that need cross-sectional equity exposure. This file
+# only declares the rate ETFs and FX pairs that are explicitly named variables.
+
+# Rate ETFs (used for Rates Trend signal and proxies).
+TLT_CLOSE:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: TLT
+  description: iShares 20+ Year Treasury Bond ETF close (auto-adjusted)
+  frequency: daily
+  instrument_type: etf
+  adjustment: auto_adjust
+
+IEF_CLOSE:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: IEF
+  description: iShares 7-10 Year Treasury Bond ETF close (auto-adjusted)
+  frequency: daily
+  instrument_type: etf
+  adjustment: auto_adjust
+
+SHY_CLOSE:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: SHY
+  description: iShares 1-3 Year Treasury Bond ETF close (auto-adjusted)
+  frequency: daily
+  instrument_type: etf
+  adjustment: auto_adjust
+
+HYG_CLOSE:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: HYG
+  description: iShares iBoxx High Yield Corporate Bond ETF close (auto-adjusted)
+  frequency: daily
+  instrument_type: etf
+  adjustment: auto_adjust
+
+# FX spot pairs (used for FX Carry signal evaluation).
+EURUSD:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: EURUSD=X
+  description: EUR/USD spot rate
+  frequency: daily
+  instrument_type: fx_spot
+  adjustment: none
+
+GBPUSD:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: GBPUSD=X
+  description: GBP/USD spot rate
+  frequency: daily
+  instrument_type: fx_spot
+  adjustment: none
+
+AUDUSD:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: AUDUSD=X
+  description: AUD/USD spot rate (planned for 5.5)
+  frequency: daily
+  instrument_type: fx_spot
+  adjustment: none
+
+NZDUSD:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: NZDUSD=X
+  description: NZD/USD spot rate (planned for 5.5)
+  frequency: daily
+  instrument_type: fx_spot
+  adjustment: none
+
+USDCAD:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: USDCAD=X
+  description: USD/CAD spot rate (planned for 5.5)
+  frequency: daily
+  instrument_type: fx_spot
+  adjustment: none
+
+USDJPY:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: USDJPY=X
+  description: USD/JPY spot rate (planned for 5.5)
+  frequency: daily
+  instrument_type: fx_spot
+  adjustment: none
+
+USDCHF:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: USDCHF=X
+  description: USD/CHF spot rate (planned for 5.5)
+  frequency: daily
+  instrument_type: fx_spot
+  adjustment: none
