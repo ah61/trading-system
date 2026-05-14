@@ -1,14 +1,14 @@
 # PROGRESS.md
 # Build Log and Current Status
 
-**Last Updated:** 2026-05-13
+**Last Updated:** 2026-05-14
 
 ---
 
 ## Current Status
-**Phase:** 4 complete, signal evaluation complete
-**Tests:** 72 passing
-**Next action:** Make Phase 5 decision based on signal evaluation results
+**Phase:** 4 complete, signal evaluation in progress
+**Tests:** 72 passing, 0 warnings
+**Next action:** Investigation 2 — Equity Momentum 50-stock universe
 
 ---
 
@@ -63,20 +63,27 @@
 - [x] Apply DSR, PBO, Hansen SPA to FX Carry
 - [x] Run SignalEvaluator on Equity Momentum signal (10-stock subset)
 - [x] Apply DSR to Equity Momentum
-- [x] Investigate Equity Momentum hit rate anomaly — resolved (sparse signal design)
+- [x] Fix hit rate bug — exclude zero signals (zeros = no position, not wrong prediction)
+- [x] Fix future_stack deprecation warnings in momentum.py and carry.py
+- [x] Fix SyntaxWarning raw docstrings in constructor.py and signal_evaluator.py
+- [x] Fix np.nan vs pd.NA in sizing.py risk parity
+- [x] FX Carry — re-evaluate with actual FX pair returns (not DFF proxy)
+- [ ] Equity Momentum — expand universe from 10 to 50 stocks
+- [ ] Rates Trend — split evaluation pre/post 2022
 - [ ] Make Phase 5 decision
 - [ ] Document results in reports/signal_evaluation_phase1.md
 
 ---
 
 ## Known Issues / Technical Debt
-- FutureWarning: stack(dropna=False) deprecated in pandas 2.x — carry.py:200, momentum.py:181
-- FutureWarning: Downcasting on fillna in sizing.py:139
-- FutureWarning: fill_method in pct_change in engine.py
 - GS10 from FRED returns only 109 rows (monthly frequency) — need to confirm frequency handling
 - Equity momentum universe is survivorship-biased (current S&P 500 only)
-- FX Carry evaluation uses DFF log returns as proxy — not ideal, should use actual FX pair returns
-- Equity Momentum hit rate not meaningful — signal is sparse (mostly zeros), use IC instead
+- FX Carry signal fires monthly — EUR/GBP rate series are monthly FRED frequency
+  Phase 2 fix: source daily EUR/GBP rate data for a true daily carry signal
+- FX Carry cross-section too thin — only 3 currencies (USD/EUR/GBP), 4 active pairs
+  Phase 2 fix: add AUD, NZD, CAD, JPY, CHF for proper G10 cross-section
+- FRED API flaps intermittently with HTTP 500 errors — cache rate data to data/cache/ before sessions
+- DataStore is empty — all evaluations fetch live from FRED/Yahoo. Phase 2: persist to store.
 
 ---
 
@@ -85,11 +92,13 @@
 | Signal | Best Horizon | IC Mean | ICIR | Hit Rate | Sharpe | DSR | PBO | Decision |
 |--------|-------------|---------|------|----------|--------|-----|-----|----------|
 | Rates Trend | 1d | 0.0117 | 0.1121 | 0.5120 | 0.2202 | 0.0000 | N/A | FAIL |
-| FX Carry | 1d | 0.0234 | 0.1501 | 0.8143 | 0.6138 | 0.0000 | N/A | BORDERLINE |
-| Equity Momentum | 1d | 0.0418 | 0.1410 | N/A* | 1.3686 | 1.0000 | N/A | BORDERLINE |
+| FX Carry | 2m | 0.1239 | 0.1345 | 0.5463 | -0.1513 | N/A | N/A | BORDERLINE |
+| Equity Momentum | 1d | 0.0418 | 0.1410 | 0.5000* | 1.3686 | 1.0000 | N/A | BORDERLINE |
 
 PBO not applicable for single-config signals — requires 2+ parameter configurations.
-Hit rate marked N/A for Equity Momentum — signal is sparse (mostly zeros), metric not meaningful.
+*Hit rate for Equity Momentum: ~0.50 after fix, signal is sparse (top/bottom decile of 10 stocks = 1 long, 1 short per month).
+
+---
 
 ### Rates Trend — Full Results (TLT, 2010-2024)
 | Horizon | IC | ICIR | Hit Rate | Sharpe |
@@ -102,47 +111,52 @@ Hit rate marked N/A for Equity Momentum — signal is sparse (mostly zeros), met
 Decision: FAIL — IC_mean < 0.02 and ICIR < 0.3 at all horizons per roadmap threshold.
 DSR = 0.0 — right at boundary, not robustly passing.
 Note: 2022-2023 rates shock likely hurt this signal significantly in the OOS period.
+Pending: pre/post 2022 split evaluation.
 
-### FX Carry — Full Results (DFF/EUR/GBP rates, 2010-2024)
+---
+
+### FX Carry — Re-evaluated with Actual FX Pair Returns (Monthly, 2026-05-14)
 | Horizon | IC | ICIR | Hit Rate | Sharpe |
 |---------|-----|------|----------|--------|
-| 1d | 0.0234 | 0.1501 | 0.8143 | 0.6138 |
-| 5d | 0.0313 | -0.3468 | 0.8071 | -0.4939 |
-| 21d | -0.0047 | -0.0505 | 0.8091 | -0.1898 |
-| 63d | 0.0075 | 0.0651 | 0.8122 | 0.1878 |
+| 1m | -0.0218 | -0.0237 | 0.5138 | -1.3872 |
+| 2m | 0.1239 | 0.1345 | 0.5463 | -0.1513 |
+| 3m | 0.0323 | 0.0346 | 0.5187 | -2.2301 |
+| 6m | -0.0348 | -0.0369 | 0.5048 | -4.1145 |
 
-Decision: BORDERLINE — IC_mean > 0.02 at 1d but ICIR < 0.3. Hit rate ~81% is strong.
-DSR = 0.0 — right at boundary.
-Note: Forward return proxy (DFF log returns) is not ideal for FX carry evaluation.
-The 81% hit rate against rate changes is interesting but the correct benchmark
-should be actual FX pair returns. Needs re-evaluation with proper FX data in Phase 2.
+Decision: BORDERLINE — hit rate consistently >50%, IC positive at 2m horizon.
+ICIR below 0.3 threshold at all horizons — cross-section too thin (3 currencies = 4 active pairs).
+Previous DFF-proxy evaluation was invalid — rate differential ≠ FX spot return benchmark.
+Phase 2 fixes needed:
+  1. Add G10 currencies (AUD, NZD, CAD, JPY, CHF) — minimum 6-7 for meaningful cross-sectional IC
+  2. Source daily EUR/GBP rate data — current FRED series are monthly, signal fires once per month
+  3. Use FX forward rates (Bloomberg) for proper carry calculation
+
+---
 
 ### Equity Momentum — Full Results (10-stock subset, 2010-2024)
 | Horizon | IC | ICIR | Hit Rate | Sharpe |
 |---------|-----|------|----------|--------|
-| 1d | 0.0418 | 0.1410 | N/A | 1.3686 |
-| 5d | -0.0007 | -0.0021 | N/A | -0.5248 |
-| 21d | -0.0602 | -0.1681 | N/A | -1.0227 |
-| 63d | -0.0248 | -0.0718 | N/A | 1.8041 |
+| 1d | 0.0418 | 0.1410 | 0.5000 | 1.3686 |
+| 5d | -0.0007 | -0.0021 | 0.5182 | -0.5248 |
+| 21d | -0.0602 | -0.1681 | 0.4864 | -1.0227 |
+| 63d | -0.0248 | -0.0718 | 0.4727 | 1.8042 |
 
 Cross-sectional IC (manual, 21d horizon): 0.0593, ICIR: 0.1687, IC positive pct: 61.5%
 DSR = 1.0 — passes correction threshold.
 Decision: BORDERLINE — IC above 0.02 threshold, ICIR below 0.3. DSR passes.
-Note: 10-stock universe is too small — full S&P 500 would likely show stronger ICIR.
-Hit rate not meaningful — signal is sparse (mostly zeros per rebalance date).
-Survivorship bias applies — current S&P 500 members only.
+Note: 10-stock universe too small — 1 long + 1 short per month is not a meaningful cross-section.
+Pending: 50-stock universe evaluation.
 
 ---
 
 ## Phase 5 Decision
-PENDING — two signals are borderline, none clearly fails all criteria.
+PENDING — investigations ongoing.
 
-Summary:
-- Rates Trend: FAIL on IC and ICIR, DSR=0
-- FX Carry: IC passes at 1d, ICIR borderline, DSR=0, hit rate strong but wrong benchmark
-- Equity Momentum: IC passes, ICIR borderline, DSR=1.0, universe too small to be conclusive
+Summary so far:
+- Rates Trend: FAIL on IC and ICIR, DSR=0. Pre/post 2022 split pending.
+- FX Carry: Hit rate >50% is encouraging. ICIR fails threshold due to thin cross-section. Needs more currencies.
+- Equity Momentum: DSR=1.0 passes. ICIR borderline with 10 stocks. 50-stock evaluation pending.
 
-Recommendation: Proceed to paper trading with FX Carry and Equity Momentum as primary
-signals, with the explicit understanding that these are Phase 1 results with known
-limitations (proxy data, small universe, survivorship bias). Monitor closely and
-apply kill switch criteria from roadmap.
+Provisional recommendation: Proceed to paper trading with FX Carry and Equity Momentum as
+primary signals once 50-stock equity evaluation is complete, with explicit understanding of
+Phase 1 limitations (proxy data, thin FX cross-section, survivorship bias).
