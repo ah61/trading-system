@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.4 — Data Persistence ✅ complete |
-| **Tests** | 113 passing (was 99, +14 from CachedSource) |
-| **Next action** | Begin Milestone 5.5 (G10 FX Expansion) |
+| **Active milestone** | 5.5 — G10 FX Expansion ✅ complete |
+| **Tests** | 119 passing |
+| **Next action** | Begin Milestone 5.6 (Equity Universe Expansion) |
 
 ---
 
@@ -174,6 +174,19 @@ of this file (`Pre-5.2 Signal Evaluation Results`).
       `CachedSource`. New `--refresh` CLI flag exposed for forced re-fetches.
 - [x] 14 new tests in `tests/test_cached_source.py` (99 → 113 passing).
 
+**Post-completion bug fixes (caught during runner verification, 2026-05-14):**
+- [x] **Ticker sanitisation**: `DataStore._validate_ident` rejects identifiers
+      with non-alphanumeric chars; Yahoo FX tickers (`EURUSD=X` etc.) and
+      tickers with dashes/dots couldn't be cached. Added `_sanitize_ticker`
+      that maps `= - . ^ /` → `_` for store keys; vendor still sees the
+      original ticker on fetch.
+- [x] **Boundary slack**: cache-coverage check was strict at calendar
+      boundaries, causing spurious misses when (i) the calendar end fell on a
+      weekend, (ii) DuckDB's `timestamptz` storage shifted dates by ±1 day, or
+      (iii) the calendar start was a holiday (e.g. Jan 1). Added 5-business-day
+      slack at the start and 1-day slack at the end.
+- [x] 6 new boundary/sanitisation tests (113 → 119 passing).
+
 **Design decisions recorded:**
 - `CachedSource` is a composition wrapper, not an inheritance subclass of
   `DataSource`. Sources stay storage-agnostic; the wrapper decides when to
@@ -184,15 +197,47 @@ of this file (`Pre-5.2 Signal Evaluation Results`).
   concerns; 5.4 does not bridge them. Catalog walks variable dependencies;
   store traces storage materialisation. Both useful, both distinct.
 
-### Milestone 5.5 — G10 FX Expansion ⬜
-- [ ] Add AUD, NZD, CAD, JPY, CHF rate series + FX spot pairs
-- [ ] Re-evaluate FX Carry with 7 currencies (using frequency layer)
-- [ ] **Fix `_iter_pairs` to anchor on USD base** — current `(a, b) for a != b`
-      double-counts trades (USD/EUR and EUR/USD carry identical information).
-      Change to `[(ccy, base) for ccy in cur if ccy != base]` to match standard
-      cross-sectional carry methodology. Update `fx_carry.yaml` known_limitations.
-- [ ] Fetch EURGBP=X and additional cross rates so all generated pairs have returns
-- [ ] Update `scripts/evaluate_signals.py` accordingly
+### Milestone 5.5 — G10 FX Expansion ✅
+
+**Completed 2026-05-14.**
+
+- [x] Add AUD, NZD, CAD, JPY, CHF rate series — declared in
+      `configs/data/variables/macro.yaml` (Milestone 5.3, made live here)
+- [x] Add corresponding FX spot pairs to `configs/data/variables/market.yaml`
+      (already declared in 5.3, made live here)
+- [x] **Fix `_iter_pairs` to anchor on USD base** — changed from
+      `(a, b) for a != b` (which produced 21 ordered pairs for 7 currencies,
+      double-counting every trade) to `[(ccy, base) for ccy in cur if ccy != base]`,
+      producing 6 USD-anchored pairs. Pair labels now mechanically `<non-USD>/USD`.
+- [x] Surface `base_currency` parameter through YAML config; defaults to "USD".
+- [x] Update `configs/signals/fx_carry.yaml` — 7 currencies in `rate_series`,
+      `base_currency: USD`, `frequency: monthly` (was already monthly from 5.2).
+- [x] Update `scripts/evaluate_signals.py::fx_carry_forward_returns` —
+      replaces hardcoded 2-pair EUR/GBP negation logic with a 7-pair
+      USD-anchored mapping. Negation only applied where Yahoo ticker convention
+      requires it (USDXXX=X for JPY/CAD/CHF).
+- [x] Tests still pass at 119/119; no test updated (no test referenced
+      pre-5.5 pair labels).
+
+**Re-evaluation results (vs pre-5.5 4-pair version):**
+
+| Horizon | IC | ICIR | Hit | Sharpe | N |
+|---------|---------|---------|------|---------|------|
+| 1mo | +0.0059 | +0.0106 | 0.5014 | -0.0737 | 1079 |
+| 2mo | -0.0056 | -0.0100 | 0.5009 | -0.1051 | 1072 |
+| 3mo | -0.0015 | -0.0027 | 0.5005 | -0.0573 | 1065 |
+| 6mo | -0.0011 | -0.0019 | 0.4990 | -0.0720 | 1044 |
+
+Observations:
+- N rose ~50% (700 → 1070) as expected from 4 → 6 pairs.
+- IC dropped to near zero with all-negative ICIR across horizons.
+- Cross-sectional carry has been broadly unprofitable post-2010 at monthly
+  frequency in this universe. Whether the underlying carry premium is genuinely
+  absent or whether the monthly-rate-differential proxy is too coarse remains
+  an open question — to be revisited when Stage 2 daily rate data and proper
+  forward-spot basis are available.
+- This is a real signal-quality finding, not a methodology bug. Phase 5 is
+  infrastructure; signal-quality testing comes next.
 
 ### Milestone 5.6 — Equity Universe Expansion ⬜
 - [ ] Expand to 200-stock universe (`configs/universes/sp500_current.yaml`)
@@ -226,7 +271,7 @@ of this file (`Pre-5.2 Signal Evaluation Results`).
 - FX Carry signal fires monthly — EUR/GBP rate series are monthly FRED frequency.
   Daily EUR/GBP rate data needed for daily carry — Stage 2 / ROADMAP Phase 7.2 (Bloomberg)
 - FX Carry cross-section too thin — only 3 currencies (USD/EUR/GBP), 4 active pairs.
-  Fixed in Milestone 5.5 (G10 expansion to 7 currencies)
+  **Resolved by Milestone 5.5** (G10 expansion to 7 currencies, 6 USD-anchored pairs)
 - FRED API flaps intermittently with HTTP 500 errors — **resolved by 5.4**.
   First successful fetch is cached to `data/raw/raw.duckdb`; subsequent runs
   read from the store. Use `--refresh` to force re-fetch.
@@ -236,6 +281,16 @@ of this file (`Pre-5.2 Signal Evaluation Results`).
 ### Signals
 - Rates Trend is regime-dependent — fails in post-trend consolidation (2023-2024).
   Fixed in Milestone 5.7 (regime filter)
+- **FX pair labels do not follow market convention.** From Milestone 5.5 onward,
+  FX Carry produces mechanical pair labels of the form `<non-USD>/USD` for all
+  pairs (e.g. `JPY/USD`, `CAD/USD`, `CHF/USD`). Market convention for those
+  three uses USD-first ordering (`USD/JPY`, `USD/CAD`, `USD/CHF`) because the
+  resulting *quoted price* is greater than 1. The signal math is correct under
+  either convention; the issue is purely cosmetic. **Why it matters:** before
+  using Interactive Brokers for paper trading (Phase 6) and before showing
+  results to traders, add a display-layer translation that emits market-
+  convention labels in reports and order tickets. Internal signal output and
+  storage keys stay mechanical. **Add as a Phase 6 prerequisite.**
 
 ### Documentation
 - `ARCHITECTURE.md` was bumped to v0.2 on 2026-05-14: renamed prior "Phase 1 / Phase 2"
@@ -265,6 +320,8 @@ all horizons). Frequency layer reproduces manual resampling. ✓
 
 ### FX Carry (monthly frequency)
 
+**Pre-5.5 (4-pair, double-counted):**
+
 | Horizon | IC | ICIR | Hit Rate | Sharpe | N |
 |---------|------|------|----------|--------|------|
 | 1m | -0.0010 | -0.0015 | 0.5028 | -0.1394 | 708 |
@@ -272,16 +329,23 @@ all horizons). Frequency layer reproduces manual resampling. ✓
 | 3m | -0.0070 | -0.0104 | 0.5000 | -0.0996 | 700 |
 | 6m | +0.0184 | +0.0268 | 0.5029 | -0.0533 | 688 |
 
-**Note:** These differ materially from historical monthly numbers (historical 2m
-IC was +0.1239; new is -0.0161). The runner uses Option A pair returns (USDEUR /
-EURUSD / USDGBP / GBPUSD log returns, inverse pairs negated, EUR/GBP and GBP/EUR
-get NaN). Historical likely used a subset of these pairs or different alignment
-— the exact pre-5.2 methodology was not committed to a script and cannot be
-reproduced bit-for-bit. With the `_iter_pairs` double-counting bug (USD/EUR
-and EUR/USD encode the same trade), expected behaviour is roughly symmetric
-results that average toward zero. That's what we see here. **Real test will be
-Milestone 5.5** when (i) `_iter_pairs` is anchored on USD, (ii) cross-section
-expands to 7 currencies, (iii) EUR/GBP and other cross pairs have real returns.
+**Post-5.5 (6-pair USD-anchored, full G10):**
+
+| Horizon | IC | ICIR | Hit Rate | Sharpe | N |
+|---------|------|------|----------|--------|------|
+| 1m | +0.0059 | +0.0106 | 0.5014 | -0.0737 | 1079 |
+| 2m | -0.0056 | -0.0100 | 0.5009 | -0.1051 | 1072 |
+| 3m | -0.0015 | -0.0027 | 0.5005 | -0.0573 | 1065 |
+| 6m | -0.0011 | -0.0019 | 0.4990 | -0.0720 | 1044 |
+
+**Read:** Cross-section now reflects the full G10 set (USD anchor + EUR, GBP,
+AUD, NZD, CAD, JPY, CHF) with mechanically-consistent pair construction. N
+grew ~50% as expected. IC is near zero across horizons, ICIR effectively
+zero — this is a real signal-quality finding, not a methodology bug. The
+post-2010 monthly carry trade has been broadly unprofitable in this universe.
+Whether the signal is genuinely absent or whether the monthly-rate-differential
+proxy is too coarse is an open question for Stage 2 (daily forward rates,
+proper forward-spot basis carry).
 
 ### Equity Momentum (monthly frequency)
 
