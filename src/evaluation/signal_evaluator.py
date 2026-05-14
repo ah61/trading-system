@@ -396,12 +396,11 @@ class SignalEvaluator:
             signal: Signal Series indexed by (date, asset) for the multi-asset
                 path, or by a plain ``DatetimeIndex`` for a single-asset signal.
                 Values should be in [-1, 1].
-            forward_returns: Either:
-                - Forward returns already aligned to (date, asset) at daily frequency, or
-                - 1-period log returns (date, asset) — the forward-return shift is
-                  applied internally as ``returns.shift(-(horizon + 1))``.
+            forward_returns: 1-period log returns aligned to the signal index.
+                The forward-return shift is applied internally as
+                ``returns.shift(-(horizon + 1))`` (per asset for MultiIndex).
                 Internal resampling will compound (sum) log returns to ``frequency``
-                before evaluation.
+                before shifting.
             horizon: Forward horizon in *periods at* ``frequency``. For
                 ``frequency='monthly'`` and ``horizon=3``, evaluates predictive
                 power over the next 3 months.
@@ -429,17 +428,10 @@ class SignalEvaluator:
                 sig_resampled, ret_resampled, horizon, frequency
             )
 
-        # Multi-asset path.
-        fwd_as_is = ret_resampled
-        fwd_shifted = self._apply_forward_return_convention(ret_resampled, horizon)
-
-        paired_as_is = pd.concat(
-            {"signal": sig_resampled, "fwd": fwd_as_is}, axis=1
-        ).dropna()
-        paired_shifted = pd.concat(
-            {"signal": sig_resampled, "fwd": fwd_shifted}, axis=1
-        ).dropna()
-        fwd = fwd_shifted if len(paired_shifted) >= len(paired_as_is) else fwd_as_is
+        # Multi-asset path. The contract is that ``forward_returns`` is a series
+        # of 1-period log returns (after any resampling). The forward shift is
+        # always applied here: ``fwd_t = returns.shift(-(horizon + 1))`` per asset.
+        fwd = self._apply_forward_return_convention(ret_resampled, horizon)
 
         paired = pd.concat({"signal": sig_resampled, "fwd": fwd}, axis=1).dropna()
         n_obs = int(len(paired))

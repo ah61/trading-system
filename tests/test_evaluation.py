@@ -30,9 +30,13 @@ def test_ic_mean_positive_for_perfect_signal() -> None:
     signal_vals = rng.normal(size=(len(dates), len(assets)))
     signal = _panel_series(dates, assets, signal_vals)
 
-    # Perfect forward returns: monotone in signal.
-    fwd = _panel_series(dates, assets, signal_vals)
+    # "Perfect" returns: equal to signal *back-rolled* by (horizon + 1) periods.
+    # Evaluator applies shift(-(horizon+1)), so to align signal[t] with the
+    # post-shift fwd[t], we need pre-shift fwd[t+(h+1)] = signal[t], i.e.
+    # pre-shift fwd[s] = signal[s-(h+1)] = np.roll(signal, +(h+1), axis=0).
     horizon = 1
+    fwd_vals = np.roll(signal_vals, +(horizon + 1), axis=0)
+    fwd = _panel_series(dates, assets, fwd_vals)
     log_returns = fwd
 
     ev = SignalEvaluator()
@@ -48,7 +52,8 @@ def test_ic_mean_near_zero_for_random_signal() -> None:
     signal = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     fwd = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     horizon = 5
-    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=True)
+    # Evaluator applies shift(-(horizon+1)) internally; pass 1-period returns.
+    log_returns = fwd
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
@@ -65,7 +70,8 @@ def test_icir_computed_correctly() -> None:
     signal = _panel_series(dates, assets, signal_vals)
     fwd = _panel_series(dates, assets, signal_vals + noise)
     horizon = 1
-    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=True)
+    # Evaluator applies shift(-(horizon+1)) internally; pass 1-period returns.
+    log_returns = fwd
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
@@ -78,8 +84,10 @@ def test_hit_rate_one_for_perfect_signal() -> None:
     assets = [f"A{i}" for i in range(20)]
     vals = np.tile(np.linspace(-1.0, 1.0, len(assets)), (len(dates), 1))
     signal = _panel_series(dates, assets, vals)
-    fwd = _panel_series(dates, assets, vals)
+    # Pre-shift so post-shift alignment is perfect.
     horizon = 1
+    fwd_vals = np.roll(vals, -(horizon + 1), axis=0)
+    fwd = _panel_series(dates, assets, fwd_vals)
     log_returns = fwd
 
     ev = SignalEvaluator()
@@ -94,8 +102,11 @@ def test_signal_sharpe_positive_for_good_signal() -> None:
 
     signal_vals = rng.normal(size=(len(dates), len(assets)))
     signal = _panel_series(dates, assets, signal_vals)
-    fwd = _panel_series(dates, assets, signal_vals * 0.02 + rng.normal(scale=0.01, size=signal_vals.shape))
     horizon = 1
+    # See test_ic_mean_positive_for_perfect_signal for the sign convention.
+    aligned_vals = np.roll(signal_vals, +(horizon + 1), axis=0)
+    fwd_vals = aligned_vals * 0.02 + rng.normal(scale=0.01, size=signal_vals.shape)
+    fwd = _panel_series(dates, assets, fwd_vals)
     log_returns = fwd
 
     ev = SignalEvaluator()
@@ -112,12 +123,13 @@ def test_n_observations_correct() -> None:
 
     fwd = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     horizon = 5
-    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=True)
+    # Evaluator applies shift(-(horizon+1)) internally; pass 1-period returns.
+    log_returns = fwd
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
 
-    # After applying shift(-(h+1)), the last (h+1) dates per asset are NaN.
+    # Evaluator applies shift(-(h+1)) per asset, so last (h+1) rows per asset drop.
     expected = (len(dates) - (horizon + 1)) * len(assets)
     assert m.n_observations == expected
 
