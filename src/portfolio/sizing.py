@@ -6,7 +6,7 @@ Phase 1 implements:
 """
 
 from __future__ import annotations
-
+import numpy as np
 from dataclasses import dataclass
 from math import log, sqrt
 from pathlib import Path
@@ -135,7 +135,7 @@ class PositionSizer:
             cols = [c for c in s.columns if str(asset_classes[c]) == cls_name]
             if not cols:
                 continue
-            denom = raw[cols].abs().sum(axis=1).replace(0.0, pd.NA)
+            denom = raw[cols].abs().sum(axis=1).replace(0.0, np.nan)
             weights_cls = raw[cols].div(denom, axis=0).fillna(0.0) * class_budget
             out.loc[:, cols] = weights_cls
 

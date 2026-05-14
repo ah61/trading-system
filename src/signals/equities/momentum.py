@@ -178,7 +178,7 @@ class EquityMomentumSignal(Signal):
         keep = long_mask | short_mask
         out_df = scaled.where(keep, other=0.0)
 
-        out = out_df.stack(dropna=False)
+        out = out_df.stack(future_stack=True)
         out.index = out.index.set_names(["date", "ticker"])
         return out.astype(float)
 

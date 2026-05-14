@@ -44,7 +44,7 @@ def test_ic_mean_near_zero_for_random_signal() -> None:
     signal = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     fwd = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     horizon = 5
-    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=False, dropna=False)
+    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=True)
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
@@ -61,7 +61,7 @@ def test_icir_computed_correctly() -> None:
     signal = _panel_series(dates, assets, signal_vals)
     fwd = _panel_series(dates, assets, signal_vals + noise)
     horizon = 1
-    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=False, dropna=False)
+    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=True)
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
@@ -108,7 +108,7 @@ def test_n_observations_correct() -> None:
 
     fwd = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
     horizon = 5
-    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=False, dropna=False)
+    log_returns = fwd.unstack().shift(horizon + 1).stack(future_stack=True)
 
     ev = SignalEvaluator()
     m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)

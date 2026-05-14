@@ -83,7 +83,7 @@ class PortfolioConstructor:
         gross_limit: float = 2.0,
         net_limit: float = 0.20,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Construct target weights and rebalance trades.
+        r"""Construct target weights and rebalance trades.
 
         Args:
             signals: Signal matrix with index=date, columns=instruments, values in [-1, 1].

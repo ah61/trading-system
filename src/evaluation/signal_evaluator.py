@@ -30,7 +30,7 @@ class SignalEvaluator:
 
     @staticmethod
     def _apply_forward_return_convention(log_returns: pd.Series, horizon: int) -> pd.Series:
-        """Apply CONVENTIONS.md forward-return shift.
+        r"""Apply CONVENTIONS.md forward-return shift.
 
         Convention:
             If input is a 1-day log return series \(r_t\), then the forward return for horizon H
