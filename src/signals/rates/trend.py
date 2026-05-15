@@ -20,29 +20,39 @@ class _RatesTrendConfig:
     signal_type: str
     frequency: str
     params: dict[str, Any]
-    required_data: list[str]
+    required_variables: list[str]
 
 
 class RatesTrendSignal(Signal):
     """Trend-following rates signal using SMA crossovers.
 
     Signal logic:
-        - Compute fast and slow SMAs of the ETF price series (default ticker: TLT).
+        - Compute fast and slow SMAs of the configured price variable
+          (default: ``TLT_CLOSE``).
         - Signal is +1 when fast SMA > slow SMA, -1 when fast SMA < slow SMA.
-        - If `scale_by_distance` is enabled, scale magnitude by the distance between MAs.
+        - If ``scale_by_distance`` is enabled, scale magnitude by the
+          relative distance between MAs (squashed to [-1, 1] via ``tanh``).
+
+    Input contract (5.7):
+        ``compute(data)`` receives ``data[<variable>]`` as a ``pd.Series`` of
+        close prices indexed by UTC ``DatetimeIndex``. The catalogue variable
+        name (e.g. ``TLT_CLOSE``) is the dict key, not the underlying Yahoo
+        ticker (``TLT``).
 
     Notes:
-        To avoid lookahead bias, price inputs are shifted by 1 period so the signal at time t
-        uses data available at or before t (i.e., up to t-1 close).
+        To avoid lookahead bias, prices are shifted by 1 period so the signal
+        at time t uses information available at or before t (i.e., up to the
+        t-1 close).
     """
 
-    # Required class attributes for `Signal.__init_subclass__`. Overwritten from config at init.
+    # Required class attributes for `Signal.__init_subclass__`. Overwritten
+    # from config at instance init.
     name: str = "rates_trend"
     asset_class: str = "rates"
     signal_type: str = "trend"
     frequency: str = "daily"
     params: dict[str, Any] = {}
-    required_data: list[str] = ["TLT"]
+    required_variables: list[str] = ["TLT_CLOSE"]
 
     _DEFAULT_CONFIG_PATH = Path("configs/signals/rates_trend.yaml")
 
@@ -53,7 +63,7 @@ class RatesTrendSignal(Signal):
         self.signal_type = cfg.signal_type
         self.frequency = cfg.frequency
         self.params = cfg.params
-        self.required_data = cfg.required_data
+        self.required_variables = cfg.required_variables
 
     @classmethod
     def _load_config(cls, config_path: str | Path | None) -> dict[str, Any]:
@@ -78,7 +88,7 @@ class RatesTrendSignal(Signal):
         if not isinstance(params, dict):
             raise TypeError("config.parameters must be a mapping.")
 
-        ticker = str(params.get("ticker", "TLT"))
+        variable = str(params.get("variable", "TLT_CLOSE"))
         fast_window = int(params.get("fast_window", 50))
         slow_window = int(params.get("slow_window", 200))
         scale_by_distance = bool(params.get("scale_by_distance", False))
@@ -92,40 +102,41 @@ class RatesTrendSignal(Signal):
             signal_type=str(signal_meta.get("signal_type", "trend")),
             frequency=str(signal_meta.get("frequency", "daily")),
             params={
-                "ticker": ticker,
+                "variable": variable,
                 "fast_window": fast_window,
                 "slow_window": slow_window,
                 "scale_by_distance": scale_by_distance,
             },
-            required_data=[ticker],
+            required_variables=[variable],
         )
 
-    def compute(self, data: Dict[str, pd.DataFrame]) -> pd.Series:
-        """Compute the rates trend signal for the configured ticker.
+    def compute(self, data: Dict[str, pd.Series]) -> pd.Series:
+        """Compute the rates trend signal for the configured variable.
 
         Args:
-            data: Mapping of ticker -> DataFrame with a 'close' column and DatetimeIndex.
+            data: Mapping of catalogue variable name -> ``pd.Series``. Must
+                contain an entry for ``self.params["variable"]`` (e.g.
+                ``"TLT_CLOSE"``).
 
         Returns:
-            Normalised signal series in [-1, 1] with UTC DatetimeIndex.
+            Normalised signal series in [-1, 1] with UTC ``DatetimeIndex``.
+
+        Raises:
+            KeyError: If the required variable is missing from ``data``.
         """
-        ticker = str(self.params["ticker"])
+        variable = str(self.params["variable"])
         fast_window = int(self.params["fast_window"])
         slow_window = int(self.params["slow_window"])
         scale_by_distance = bool(self.params["scale_by_distance"])
 
-        if ticker not in data:
-            raise KeyError(f"Missing required data for ticker: {ticker!r}")
+        if variable not in data:
+            raise KeyError(f"Missing required variable: {variable!r}")
 
-        df = data[ticker]
-        if "close" not in df.columns:
-            raise KeyError(f"Expected 'close' column for {ticker!r}.")
-
-        close = df["close"].astype(np.float64)
+        close = data[variable].astype(np.float64)
         close.index = pd.to_datetime(close.index, utc=True)
         close = close.sort_index()
 
-        # No-lookahead: signal at t uses information up to t-1 close.
+        # No-lookahead: signal at t uses information up to the t-1 close.
         px = close.shift(1)
 
         fast = px.rolling(window=fast_window, min_periods=fast_window).mean()
@@ -145,4 +156,3 @@ class RatesTrendSignal(Signal):
         out = raw.clip(-1.0, 1.0).astype(float)
         out.index = pd.to_datetime(out.index, utc=True)
         return out
-

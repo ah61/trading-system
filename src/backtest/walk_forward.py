@@ -1,4 +1,9 @@
-"""Walk-forward orchestration over sequential train/test segments."""
+"""Walk-forward orchestration over sequential train/test segments.
+
+5.7 contract: data is ``Dict[catalogue_variable_name, pd.Series]``. This
+orchestrator does not touch data directly — it threads everything through
+``BacktestEngine.run`` — so the change is type-hints only.
+"""
 
 from __future__ import annotations
 
@@ -57,7 +62,7 @@ class WalkForwardEngine:
     def run(
         self,
         signals: List[Signal],
-        data: Dict[str, pd.DataFrame],
+        data: Dict[str, pd.Series],
         portfolio_config: dict,
         cost_model: CostModel,
         start_date: date,
@@ -70,8 +75,9 @@ class WalkForwardEngine:
 
         Args:
             signals: Signal objects passed through to ``BacktestEngine``.
-            data: Named datasets (must include ``portfolio_config['prices_key']``).
-            portfolio_config: Portfolio construction settings.
+            data: ``Dict[catalogue_variable_name, pd.Series]`` (5.7 contract).
+            portfolio_config: Portfolio construction settings; must include
+                ``instruments`` and ``asset_classes`` (see ``BacktestEngine.run``).
             cost_model: Shared cost model for every fold.
             start_date: Global in-sample calendar start (inclusive).
             end_date: Global calendar end (inclusive).

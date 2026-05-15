@@ -1,25 +1,19 @@
 """Evaluate all Phase 1 / Stage 1 signals through the SignalEvaluator frequency layer.
 
-This script is the reproducible entry point for Milestone 5.2's "re-run all signal
-evaluations at correct frequency" step. It loads each signal from its YAML config,
-fetches the required data live from FRED/Yahoo, runs the new frequency-layer
-SignalEvaluator, and writes a Markdown report to `reports/signal_evaluation_phase1.md`.
+Reproducible runner for signal evaluation. Under Milestone 5.7, all data access
+routes through ``VariableCatalog`` — there are no direct Yahoo or FRED calls in
+this file. Variable names follow DD-007 conventions:
+
+  - ``TLT_CLOSE``, ``EURUSD``, ``USDJPY``, ... — market prices (Yahoo)
+  - ``DFF``, ``EUR_RATE``, ``GBP_RATE``, ``AUD_RATE``, ``NZD_RATE``,
+    ``CAD_RATE``, ``JPY_RATE``, ``CHF_RATE`` — interbank rates (FRED)
+  - ``AAPL_CLOSE``, ``MSFT_CLOSE``, ... — universe-expanded equity closes (Yahoo)
 
 Usage (from repo root):
     python scripts/evaluate_signals.py
     python scripts/evaluate_signals.py --start 2010-01-01 --end 2024-12-31
-    python scripts/evaluate_signals.py --signal rates_trend  # one signal only
-
-Notes:
-    - Hits the network. Until Milestone 5.4 (Data Persistence) is done, this
-      script does NOT use DataStore. Replace the fetch_* helpers when 5.4 lands.
-    - FX Carry pair returns match the PROGRESS.md methodology (Option A):
-      EURUSD=X and GBPUSD=X from Yahoo, inverse pairs negated. EUR/GBP and
-      GBP/EUR pairs get NaN forward returns and are dropped from the cross-section.
-      This is intentional — Milestone 5.5 will revisit pair construction.
-    - Equity Momentum runs against the configured universe in
-      `configs/universes/sp500_current.yaml`. Per PROGRESS.md, current cached
-      universe is 50 stocks.
+    python scripts/evaluate_signals.py --signal rates_trend
+    python scripts/evaluate_signals.py --refresh
 """
 
 from __future__ import annotations
@@ -40,11 +34,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.cached_source import CachedSource
 from src.data.sources.fred import FREDSource
 from src.data.sources.yahoo import YahooSource
 from src.data.store import DataStore
+from src.data.variable_catalog import VariableCatalog
 from src.evaluation.signal_evaluator import SignalEvaluator, SignalMetrics
+from src.reporting.output_manager import OutputManager
 from src.signals.equities.momentum import EquityMomentumSignal
 from src.signals.fx.carry import FXCarrySignal
 from src.signals.rates.trend import RatesTrendSignal
@@ -57,46 +52,51 @@ DATA_DIR = ROOT / "data"
 
 
 # ---------------------------------------------------------------------------
-# Data fetching — Milestone 5.4 routes through DataStore via CachedSource.
-# First run fetches from FRED/Yahoo and writes to data/raw/raw.duckdb.
-# Subsequent runs read from the store; no network calls.
-# Use --refresh on the CLI to force a re-fetch.
+# Catalogue construction
 # ---------------------------------------------------------------------------
 
 
-def _make_cached_fred() -> CachedSource:
+def build_catalog() -> VariableCatalog:
+    """Build a stateful VariableCatalog wired to FRED + Yahoo + DataStore.
+
+    The catalogue handles all source routing internally: signals request
+    variables by catalogue name, the catalogue dispatches to the right
+    source. Use ``catalog.get(name, frequency=..., start=..., end=...)`` to
+    pull a Series; the underlying ``CachedSource`` wrapper handles
+    write-through caching to ``data/raw/raw.duckdb`` on first fetch.
+    """
     store = DataStore(data_dir=DATA_DIR)
-    return CachedSource(source=FREDSource(), store=store, source_name="fred")
+    return VariableCatalog.load(
+        root=ROOT / "configs" / "data",
+        sources={"fred": FREDSource(), "yahoo": YahooSource()},
+        store=store,
+    )
 
 
-def _make_cached_yahoo() -> CachedSource:
-    store = DataStore(data_dir=DATA_DIR)
-    return CachedSource(source=YahooSource(), store=store, source_name="yahoo")
+def fetch_variables(
+    catalog: VariableCatalog,
+    names: list[str],
+    *,
+    frequency: str | None,
+    start: date,
+    end: date,
+) -> dict[str, pd.Series]:
+    """Fetch a list of variables from the catalogue.
 
-
-def fetch_fred(
-    series_ids: list[str], start: date, end: date, *, force_refresh: bool = False
-) -> dict[str, pd.DataFrame]:
-    """Fetch FRED series, caching to data/raw/raw.duckdb."""
-    cached = _make_cached_fred()
-    out: dict[str, pd.DataFrame] = {}
-    for sid in series_ids:
-        out[sid] = cached.fetch_or_load(
-            sid, start, end, frequency="daily", force_refresh=force_refresh
-        )
-    return out
-
-
-def fetch_yahoo(
-    tickers: list[str], start: date, end: date, *, force_refresh: bool = False
-) -> dict[str, pd.DataFrame]:
-    """Fetch Yahoo tickers, caching to data/raw/raw.duckdb."""
-    cached = _make_cached_yahoo()
-    out: dict[str, pd.DataFrame] = {}
-    for tkr in tickers:
-        out[tkr] = cached.fetch_or_load(
-            tkr, start, end, frequency="daily", force_refresh=force_refresh
-        )
+    Args:
+        catalog: Initialised stateful catalogue.
+        names: Catalogue variable names to fetch.
+        frequency: Target frequency, or ``None`` to keep each variable's
+            native frequency. Pass the signal's ``frequency`` here when
+            feeding the signal's own inputs; pass ``"daily"`` when fetching
+            the underlying price series used to construct forward returns
+            (the SignalEvaluator frequency layer resamples downstream).
+        start: Inclusive start date.
+        end: Inclusive end date.
+    """
+    out: dict[str, pd.Series] = {}
+    for name in names:
+        out[name] = catalog.get(name, frequency=frequency, start=start, end=end)
     return out
 
 
@@ -105,78 +105,68 @@ def fetch_yahoo(
 # ---------------------------------------------------------------------------
 
 
-def rates_trend_forward_returns(tlt_df: pd.DataFrame) -> pd.Series:
+def rates_trend_forward_returns(tlt_close: pd.Series) -> pd.Series:
     """Single-asset daily log returns for TLT."""
-    close = tlt_df["close"].astype(float).sort_index()
+    close = tlt_close.astype(float).sort_index()
     return np.log(close / close.shift(1)).dropna()
 
 
 def equity_momentum_forward_returns(
-    price_data: dict[str, pd.DataFrame],
+    price_series: dict[str, pd.Series],
 ) -> pd.Series:
-    """Per-ticker daily log returns, returned as MultiIndex (date, ticker) Series.
+    """Per-variable daily log returns, returned as a MultiIndex ``(date, variable)`` Series.
 
-    The frequency layer in SignalEvaluator will resample these to monthly.
+    Asset level uses catalogue variable names (e.g. ``"AAPL_CLOSE"``), matching
+    the signal output's asset level so the SignalEvaluator can align cross-
+    section without translation.
     """
-    series_by_ticker = {}
-    for tkr, df in price_data.items():
-        close = df["close"].astype(float).sort_index()
-        ret = np.log(close / close.shift(1))
-        series_by_ticker[tkr] = ret
-    panel = pd.DataFrame(series_by_ticker).sort_index()
+    series_by_var = {}
+    for var, close in price_series.items():
+        c = close.astype(float).sort_index()
+        series_by_var[var] = np.log(c / c.shift(1))
+    panel = pd.DataFrame(series_by_var).sort_index()
     stacked = panel.stack(future_stack=True)
-    stacked.index = stacked.index.set_names(["date", "ticker"])
+    stacked.index = stacked.index.set_names(["date", "variable"])
     return stacked.astype(float)
 
 
-# USD-anchored Yahoo ticker mapping. Signal output labels are mechanically
-# "<quote>/<base>" with base="USD" (per _iter_pairs), so all labels are
-# "<non-USD>/USD". Yahoo, however, has both XXXUSD=X and USDXXX=X tickers
-# depending on market convention:
-#   - EUR/USD, GBP/USD, AUD/USD, NZD/USD → Yahoo has XXXUSD=X (USD is quote
-#     in market terms). Our pair "<X>/USD" = long X / short USD = long the
-#     Yahoo ticker. No negation.
-#   - CAD/USD, JPY/USD, CHF/USD → Yahoo has USDXXX=X (USD is base in market
-#     terms). Our pair "X/USD" = long X / short USD = short the Yahoo ticker.
-#     Must negate the log return.
-# This dict encodes both the ticker AND whether to negate.
-FX_PAIR_TO_YAHOO: dict[str, tuple[str, bool]] = {
-    # signal pair label → (yahoo ticker, negate?)
-    "EUR/USD": ("EURUSD=X", False),
-    "GBP/USD": ("GBPUSD=X", False),
-    "AUD/USD": ("AUDUSD=X", False),
-    "NZD/USD": ("NZDUSD=X", False),
-    "CAD/USD": ("USDCAD=X", True),
-    "JPY/USD": ("USDJPY=X", True),
-    "CHF/USD": ("USDCHF=X", True),
+# Maps the FXCarrySignal's mechanical pair labels to the catalogue spot
+# variable used for forward-return construction, plus a negate flag for
+# pairs where the spot variable's market-convention orientation is reversed
+# vs the signal pair (USDXXX vs XXXUSD). See market.yaml for the variable
+# declarations.
+FX_PAIR_TO_SPOT_VARIABLE: dict[str, tuple[str, bool]] = {
+    # signal pair label → (catalogue spot variable name, negate?)
+    "EUR/USD": ("EURUSD", False),
+    "GBP/USD": ("GBPUSD", False),
+    "AUD/USD": ("AUDUSD", False),
+    "NZD/USD": ("NZDUSD", False),
+    "CAD/USD": ("USDCAD", True),
+    "JPY/USD": ("USDJPY", True),
+    "CHF/USD": ("USDCHF", True),
 }
 
-# The unique set of Yahoo tickers we need to fetch.
-FX_YAHOO_TICKERS: list[str] = sorted({t for t, _ in FX_PAIR_TO_YAHOO.values()})
+FX_SPOT_VARIABLES: list[str] = sorted({v for v, _ in FX_PAIR_TO_SPOT_VARIABLE.values()})
 
 
 def fx_carry_forward_returns(
-    spot_data: dict[str, pd.DataFrame],
+    spot_series: dict[str, pd.Series],
     pairs_in_signal: list[str],
 ) -> pd.Series:
-    """Construct per-pair daily log returns from Yahoo USD-anchored spot data.
+    """Construct per-pair daily log returns from USD-anchored spot variables.
 
-    Signal pair labels follow ``_iter_pairs`` convention: ``"<quote>/<base>"``
-    with base=USD. Yahoo pair tickers follow market convention which puts USD
-    first for JPY/CAD/CHF. The mapping in ``FX_PAIR_TO_YAHOO`` translates
-    between the two and applies a sign flip where needed.
-
-    Pairs not in the lookup table (e.g. cross rates we don't fetch) return
-    NaN-filled series and are silently dropped downstream.
+    Pairs in the signal labelled ``"<X>/USD"`` are mapped to a catalogue spot
+    variable whose orientation may be either ``XXXUSD`` (no negation needed)
+    or ``USDXXX`` (negate). See DD-005 for label convention.
     """
-    returns_by_ticker: dict[str, pd.Series] = {}
-    for ticker, df in spot_data.items():
-        close = df["close"].astype(float).sort_index()
-        returns_by_ticker[ticker] = np.log(close / close.shift(1))
+    returns_by_var: dict[str, pd.Series] = {}
+    for var, close in spot_series.items():
+        c = close.astype(float).sort_index()
+        returns_by_var[var] = np.log(c / c.shift(1))
 
     # Common business-day index across all fetched spot rates.
     common_index: pd.DatetimeIndex | None = None
-    for r in returns_by_ticker.values():
+    for r in returns_by_var.values():
         common_index = r.index if common_index is None else common_index.intersection(r.index)
     if common_index is None:
         raise RuntimeError("No FX spot data available to construct returns.")
@@ -185,18 +175,18 @@ def fx_carry_forward_returns(
     series_by_pair: dict[str, pd.Series] = {}
     missing_pairs: list[str] = []
     for pair in pairs_in_signal:
-        mapping = FX_PAIR_TO_YAHOO.get(pair)
-        if mapping is None or mapping[0] not in returns_by_ticker:
+        mapping = FX_PAIR_TO_SPOT_VARIABLE.get(pair)
+        if mapping is None or mapping[0] not in returns_by_var:
             missing_pairs.append(pair)
             series_by_pair[pair] = pd.Series(np.nan, index=common_index)
             continue
-        yahoo_ticker, negate = mapping
-        r = returns_by_ticker[yahoo_ticker].reindex(common_index)
+        spot_var, negate = mapping
+        r = returns_by_var[spot_var].reindex(common_index)
         series_by_pair[pair] = -r if negate else r
 
     if missing_pairs:
         logger.warning(
-            "FX Carry: no Yahoo data for {} pair(s): {}. These will be NaN-dropped.",
+            "FX Carry: no spot data for {} pair(s): {}. These will be NaN-dropped.",
             len(missing_pairs), missing_pairs,
         )
 
@@ -227,51 +217,74 @@ def evaluate_at_horizons(
     ev = SignalEvaluator()
     out = []
     for h in horizons:
-        m = ev.evaluate(signal=signal, forward_returns=forward_returns,
-                        horizon=h, frequency=frequency)
+        m = ev.evaluate(
+            signal=signal, forward_returns=forward_returns,
+            horizon=h, frequency=frequency,
+        )
         out.append((h, m))
     return out
 
 
-def evaluate_rates_trend(start: date, end: date, *, force_refresh: bool = False) -> EvaluationResult:
+def evaluate_rates_trend(
+    catalog: VariableCatalog, start: date, end: date,
+) -> EvaluationResult:
     logger.info("=== Rates Trend ===")
     sig_obj = RatesTrendSignal()
-    tickers = list(sig_obj.required_data)
-    data = fetch_yahoo(tickers, start, end, force_refresh=force_refresh)
-    signal = sig_obj.compute(data).dropna()
-    fwd = rates_trend_forward_returns(data[tickers[0]])
+    # Signal frequency is daily; native frequency of TLT_CLOSE is daily.
+    inputs = fetch_variables(
+        catalog, sig_obj.required_variables,
+        frequency=sig_obj.frequency, start=start, end=end,
+    )
+    signal = sig_obj.compute(inputs).dropna()
+    # Forward returns from the same TLT_CLOSE series.
+    fwd = rates_trend_forward_returns(inputs[sig_obj.params["variable"]])
     horizons = [1, 5, 21, 63]  # days
     rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
     return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
 
 
-def evaluate_fx_carry(start: date, end: date, *, force_refresh: bool = False) -> EvaluationResult:
+def evaluate_fx_carry(
+    catalog: VariableCatalog, start: date, end: date,
+) -> EvaluationResult:
     logger.info("=== FX Carry ===")
     sig_obj = FXCarrySignal()
-    fred_data = fetch_fred(list(sig_obj.required_data), start, end, force_refresh=force_refresh)
-    yahoo_data = fetch_yahoo(
-        FX_YAHOO_TICKERS, start, end, force_refresh=force_refresh
+    # Signal frequency is monthly. DFF is natively daily, the others natively
+    # monthly; catalogue resamples whichever side doesn't match.
+    rate_inputs = fetch_variables(
+        catalog, sig_obj.required_variables,
+        frequency=sig_obj.frequency, start=start, end=end,
     )
-    signal = sig_obj.compute(fred_data).dropna()
+    signal = sig_obj.compute(rate_inputs).dropna()
 
-    # Extract pair labels from the MultiIndex.
     pairs_in_signal = sorted({p for _, p in signal.index})
     logger.info("FX Carry pairs in signal: {}", pairs_in_signal)
 
-    fwd = fx_carry_forward_returns(spot_data=yahoo_data, pairs_in_signal=pairs_in_signal)
+    # Forward returns from daily spot prices; the SignalEvaluator frequency
+    # layer aggregates to monthly inside evaluate().
+    spot_inputs = fetch_variables(
+        catalog, FX_SPOT_VARIABLES,
+        frequency="daily", start=start, end=end,
+    )
+    fwd = fx_carry_forward_returns(spot_series=spot_inputs, pairs_in_signal=pairs_in_signal)
     horizons = [1, 2, 3, 6]  # months
     rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
     return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
 
 
-def evaluate_equity_momentum(start: date, end: date, *, force_refresh: bool = False) -> EvaluationResult:
+def evaluate_equity_momentum(
+    catalog: VariableCatalog, start: date, end: date,
+) -> EvaluationResult:
     logger.info("=== Equity Momentum ===")
     sig_obj = EquityMomentumSignal()
-    tickers = list(sig_obj.required_data)
-    logger.info("Equity Momentum universe: {} tickers", len(tickers))
-    data = fetch_yahoo(tickers, start, end, force_refresh=force_refresh)
-    signal = sig_obj.compute(data).dropna()
-    fwd = equity_momentum_forward_returns(data)
+    logger.info("Equity Momentum universe: {} variables", len(sig_obj.required_variables))
+    # Per-name daily closes serve both the signal (which resamples to monthly
+    # internally) and the forward-return computation.
+    inputs = fetch_variables(
+        catalog, sig_obj.required_variables,
+        frequency="daily", start=start, end=end,
+    )
+    signal = sig_obj.compute(inputs).dropna()
+    fwd = equity_momentum_forward_returns(inputs)
     horizons = [1, 2, 3, 6]  # months
     rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
     return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
@@ -299,7 +312,8 @@ def render_report(results: list[EvaluationResult], start: date, end: date) -> st
     lines.append("# Signal Evaluation — Phase 1 / Stage 1\n")
     lines.append(f"**Generated:** {date.today().isoformat()}  ")
     lines.append(f"**Evaluation period:** {start.isoformat()} to {end.isoformat()}  ")
-    lines.append("**Evaluator:** SignalEvaluator with Milestone 5.2 frequency layer.\n")
+    lines.append("**Evaluator:** SignalEvaluator with Milestone 5.2 frequency layer.  ")
+    lines.append("**Data access:** Routed through VariableCatalog (Milestone 5.7).\n")
     lines.append("This report is auto-generated by `scripts/evaluate_signals.py`. ")
     lines.append("Do not edit by hand — re-run the script.\n")
     lines.append("---\n")
@@ -313,12 +327,13 @@ def render_report(results: list[EvaluationResult], start: date, end: date) -> st
         lines.append("")
     lines.append("---\n")
     lines.append("## Methodology Notes\n")
-    lines.append("- **Rates Trend:** TLT close-to-close log returns, daily horizons.")
-    lines.append("- **FX Carry:** USDEUR/EURUSD/USDGBP/GBPUSD log returns from Yahoo, "
-                 "inverse pairs negated. EUR/GBP and GBP/EUR pairs get NaN returns and "
-                 "drop from the cross-section. Milestone 5.5 will revisit pair construction.")
-    lines.append("- **Equity Momentum:** Per-ticker daily log returns, resampled to "
-                 "monthly by the frequency layer (sum of log returns).")
+    lines.append("- **Rates Trend:** TLT_CLOSE close-to-close log returns, daily horizons.")
+    lines.append("- **FX Carry:** USD-anchored G10 spot variables (`EURUSD`, `GBPUSD`, "
+                 "`AUDUSD`, `NZDUSD`, `USDCAD`, `USDJPY`, `USDCHF`). Pairs labelled "
+                 "`<non-USD>/USD` mechanically (DD-005); USDXXX-orientation spots are "
+                 "negated. SignalEvaluator resamples daily returns to monthly internally.")
+    lines.append("- **Equity Momentum:** Per-variable daily log returns from "
+                 "`{ticker}_CLOSE` catalogue names, resampled to monthly by the frequency layer.")
     lines.append("- **Annualisation:** Sharpe annualised by sqrt(252) for daily, "
                  "sqrt(12) for monthly (frequency layer handles automatically).")
     lines.append("")
@@ -359,18 +374,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--refresh", action="store_true",
-        help="Bypass the DataStore cache and re-fetch all data from FRED/Yahoo.",
+        help="Bypass the DataStore cache and re-fetch all data from FRED/Yahoo. "
+             "Note: 5.7 catalogue does not expose a force-refresh flag on get(); "
+             "to force a refresh, delete data/raw/raw.duckdb before running.",
     )
     args = parser.parse_args(argv)
 
+    if args.refresh:
+        logger.warning(
+            "--refresh flag is currently advisory under 5.7 (catalogue.get does "
+            "not expose force_refresh). Delete data/raw/raw.duckdb to force "
+            "re-fetch, or extend VariableCatalog.get() in a follow-up."
+        )
+
+    catalog = build_catalog()
     targets = [args.signal] if args.signal else list(SIGNAL_REGISTRY.keys())
 
     results: list[EvaluationResult] = []
     for name in targets:
         try:
-            results.append(
-                SIGNAL_REGISTRY[name](args.start, args.end, force_refresh=args.refresh)
-            )
+            results.append(SIGNAL_REGISTRY[name](catalog, args.start, args.end))
         except Exception as e:
             logger.exception("Signal {} failed: {}", name, e)
 
@@ -389,10 +412,42 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     if not args.no_report and results:
-        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Milestone 5.6: structured output via OutputManager. Each evaluation
+        # becomes a `reports/variables/{ts}_signal_evaluation/` run.
+        mgr = OutputManager(reports_root=ROOT / "reports")
+        run = mgr.new_variable(
+            name="signal_evaluation",
+            config={
+                "start": args.start.isoformat(),
+                "end": args.end.isoformat(),
+                "signals": [r.signal_name for r in results],
+                "refresh": args.refresh,
+                "data_access": "VariableCatalog (5.7)",
+            },
+        )
         report = render_report(results, args.start, args.end)
+        (run.path / "results.md").write_text(report, encoding="utf-8")
+        rows: list[dict[str, Any]] = []
+        for r in results:
+            for horizon, m in r.rows:
+                rows.append({
+                    "signal": r.signal_name,
+                    "frequency": r.frequency,
+                    "horizon": horizon,
+                    "ic": m.ic_mean,
+                    "icir": m.icir,
+                    "hit_rate": m.hit_rate,
+                    "sharpe": m.signal_sharpe,
+                    "n": m.n_observations,
+                })
+        pd.DataFrame(rows).to_csv(run.path / "results.csv", index=False)
+        run.finalize()
+        logger.info("Structured report written: {}", run.path)
+
+        # Legacy path (deprecated; kept for now to avoid breaking outside refs).
+        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
         REPORT_PATH.write_text(report, encoding="utf-8")
-        logger.info("Report written: {}", REPORT_PATH)
+        logger.info("Legacy report written: {}", REPORT_PATH)
 
     return 0
 

@@ -1,5 +1,9 @@
 """Combinatorial purged cross-validation (CPCV) orchestration for backtests.
 
+5.7 contract: data is ``Dict[catalogue_variable_name, pd.Series]``. The only
+substantive change vs the pre-5.7 module is ``_restrict_data_to_timestamps``,
+which now slices Series instead of DataFrames.
+
 References:
     López de Prado, M. (2018). *Advances in Financial Machine Learning*. Wiley.
 """
@@ -26,16 +30,16 @@ _MAX_COMBINATIONS = 50
 
 
 def _restrict_data_to_timestamps(
-    data: Dict[str, pd.DataFrame],
+    data: Dict[str, pd.Series],
     timestamps: pd.DatetimeIndex,
-) -> Dict[str, pd.DataFrame]:
+) -> Dict[str, pd.Series]:
     """Return a shallow copy of ``data`` restricted to rows whose index is in ``timestamps``."""
     allow = set(pd.DatetimeIndex(timestamps))
-    out: Dict[str, pd.DataFrame] = {}
-    for name, df in data.items():
-        frame = df.copy()
-        frame.index = _as_utc_index(frame.index)
-        out[name] = frame.loc[frame.index.isin(allow)].sort_index()
+    out: Dict[str, pd.Series] = {}
+    for name, series in data.items():
+        s = series.copy()
+        s.index = _as_utc_index(s.index)
+        out[name] = s.loc[s.index.isin(allow)].sort_index()
     return out
 
 
@@ -79,7 +83,7 @@ class CPCVEngine:
     def run(
         self,
         signals: List[Signal],
-        data: Dict[str, pd.DataFrame],
+        data: Dict[str, pd.Series],
         portfolio_config: dict,
         cost_model: CostModel,
         start_date: date,
@@ -91,13 +95,13 @@ class CPCVEngine:
 
         The timeline is partitioned into ``n_groups`` contiguous blocks of (approximately) equal
         length. Each combination of ``k_test`` blocks defines an OOS calendar; the complement
-        defines the in-sample region used only for the PBO rank construction (via a nested tail
-        segment on the train calendar).
+        defines the in-sample region used only for the PBO rank construction.
 
         Args:
             signals: Signal objects passed through to ``BacktestEngine``.
-            data: Named datasets (must include ``portfolio_config['prices_key']``).
-            portfolio_config: Portfolio construction settings.
+            data: ``Dict[catalogue_variable_name, pd.Series]`` (5.7 contract).
+            portfolio_config: Portfolio construction settings; must include
+                ``instruments`` and ``asset_classes`` (see ``BacktestEngine.run``).
             cost_model: Shared cost model for every path.
             start_date: Inclusive global calendar start.
             end_date: Inclusive global calendar end.
@@ -199,7 +203,7 @@ class CPCVEngine:
     def _is_sharpe_train_tail(
         self,
         signals: List[Signal],
-        data: Dict[str, pd.DataFrame],
+        data: Dict[str, pd.Series],
         portfolio_config: dict,
         cost_model: CostModel,
         train_cal: pd.DatetimeIndex,

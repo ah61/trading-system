@@ -1,4 +1,8 @@
-"""Tests for walk-forward backtest engines (synthetic data only)."""
+"""Tests for walk-forward backtest engines (synthetic data only).
+
+5.7 contract: data is ``Dict[catalogue_variable_name, pd.Series]`` and
+``portfolio_config['instruments']`` enumerates the tradeable instruments.
+"""
 
 from __future__ import annotations
 
@@ -31,35 +35,63 @@ from src.portfolio.costs import CostModel
 from src.signals.base import Signal
 
 
-def _prices(n: int = 40, seed: int = 0) -> pd.DataFrame:
+# Names used throughout the suite to stand in for catalogue variable names.
+# Pre-5.7 these were column names inside a single "prices" DataFrame; under
+# 5.7 they're top-level keys in the data dict, each pointing at a Series.
+_INSTRUMENTS = ["AAA", "BBB"]
+
+
+def _price_data(n: int = 40, seed: int = 0) -> Dict[str, pd.Series]:
+    """Build synthetic price Series for two instruments.
+
+    Returns a dict shaped to the 5.7 contract: keys are instrument names,
+    values are 1-D price Series indexed by UTC datetime.
+    """
     rng = np.random.default_rng(seed)
     idx = pd.date_range("2020-01-01", periods=n, freq="D", tz="UTC")
     a = 100.0 + np.cumsum(rng.normal(0.0, 0.5, size=n))
     b = 200.0 + np.cumsum(rng.normal(0.0, 0.3, size=n))
-    return pd.DataFrame({"AAA": a, "BBB": b}, index=idx)
+    return {
+        "AAA": pd.Series(a, index=idx, name="AAA"),
+        "BBB": pd.Series(b, index=idx, name="BBB"),
+    }
+
+
+def _default_cfg(**overrides: Any) -> dict:
+    """Standard portfolio config used across the test suite."""
+    cfg = {
+        "instruments": list(_INSTRUMENTS),
+        "asset_classes": {"AAA": "equity", "BBB": "equity"},
+        "vol_window": 5,
+        "sizing_method": "vol_target",
+        "target_vol": 0.10,
+        "gross_limit": 2.0,
+        "net_limit": 1.0,
+    }
+    cfg.update(overrides)
+    return cfg
 
 
 class _SpyNoLookaheadSignal(Signal):
-    """Records the latest timestamp seen in ``prices`` on every ``compute`` call."""
+    """Records the latest timestamp seen in ``AAA`` on every ``compute`` call."""
 
     name = "spy_no_lookahead"
     asset_class = "equity"
     signal_type = "spy"
     frequency = "daily"
     params: Dict[str, Any] = {}
-    required_data = ["prices"]
+    required_variables = ["AAA", "BBB"]
 
     call_max_timestamps: List[pd.Timestamp] = []
 
-    def compute(self, data: Dict[str, pd.DataFrame]) -> pd.Series:
-        px = data["prices"]
-        mx = pd.Timestamp(px.index.max())
+    def compute(self, data: Dict[str, pd.Series]) -> pd.Series:
+        close = data["AAA"].astype(float)
+        mx = pd.Timestamp(close.index.max())
         if mx.tzinfo is None:
             mx = mx.tz_localize("UTC")
         else:
             mx = mx.tz_convert("UTC")
         self.call_max_timestamps.append(mx)
-        close = px["AAA"].astype(float)
         return close.pct_change().fillna(0.0)
 
 
@@ -69,10 +101,10 @@ class _MomentumSignal(Signal):
     signal_type = "momentum"
     frequency = "daily"
     params: Dict[str, Any] = {}
-    required_data = ["prices"]
+    required_variables = ["AAA", "BBB"]
 
-    def compute(self, data: Dict[str, pd.DataFrame]) -> pd.Series:
-        close = data["prices"]["AAA"].astype(float)
+    def compute(self, data: Dict[str, pd.Series]) -> pd.Series:
+        close = data["AAA"].astype(float)
         sig = close.pct_change(periods=2).fillna(0.0)
         return sig.clip(-1.0, 1.0)
 
@@ -84,21 +116,22 @@ def _reset_spy() -> None:
     _SpyNoLookaheadSignal.call_max_timestamps.clear()
 
 
+def _calendar_from_data(data: Dict[str, pd.Series]) -> pd.DatetimeIndex:
+    """Union of all Series indices, used to derive start/end dates in tests."""
+    ix: pd.DatetimeIndex | None = None
+    for s in data.values():
+        ix = s.index if ix is None else ix.union(s.index)
+    assert ix is not None
+    return pd.DatetimeIndex(ix).sort_values()
+
+
 def test_no_lookahead_enforced() -> None:
-    prices = _prices(30)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
+    data = _price_data(30)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
     spy = _SpyNoLookaheadSignal()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-        "sizing_method": "vol_target",
-        "target_vol": 0.10,
-        "gross_limit": 2.0,
-        "net_limit": 1.0,
-    }
+    cfg = _default_cfg()
     engine = BacktestEngine()
     engine.run(
         signals=[spy],
@@ -111,7 +144,6 @@ def test_no_lookahead_enforced() -> None:
         train_window=10,
         test_window=5,
     )
-    cal = pd.DatetimeIndex(prices.index).sort_values()
     history = cal[cal <= cal[-1]]
     assert len(spy.call_max_timestamps) == len(history)
     for i, mx in enumerate(spy.call_max_timestamps):
@@ -119,15 +151,11 @@ def test_no_lookahead_enforced() -> None:
 
 
 def test_backtest_result_has_required_fields() -> None:
-    prices = _prices(25)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(25)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     res = BacktestEngine().run(
         signals=[_MomentumSignal()],
         data=data,
@@ -145,15 +173,11 @@ def test_backtest_result_has_required_fields() -> None:
 
 
 def test_net_returns_less_than_gross() -> None:
-    prices = _prices(35, seed=1)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(35, seed=1)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     model = CostModel(
         spread_bps={"AAA": 50.0, "BBB": 50.0},
         market_impact_model="linear",
@@ -171,7 +195,6 @@ def test_net_returns_less_than_gross() -> None:
         test_window=10,
     )
     assert len(res.gross_returns) == len(res.net_returns)
-    # Net cumulative return should be less than gross cumulative return
     gross_cum = res.gross_returns.fillna(0).sum()
     net_cum = res.net_returns.fillna(0).sum()
     assert net_cum <= gross_cum + 1e-10
@@ -181,15 +204,11 @@ def test_net_returns_less_than_gross() -> None:
 def test_walk_forward_expanding_window_grows() -> None:
     n = 45
     train_w, test_w = 12, 6
-    prices = _prices(n, seed=2)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(n, seed=2)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     wf = WalkForwardEngine()
     results = wf.run(
         signals=[_MomentumSignal()],
@@ -211,15 +230,11 @@ def test_walk_forward_expanding_window_grows() -> None:
 def test_walk_forward_rolling_windows_fixed() -> None:
     n = 50
     train_w, test_w = 14, 7
-    prices = _prices(n, seed=3)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(n, seed=3)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     wf = WalkForwardEngine()
     results = wf.run(
         signals=[_MomentumSignal()],
@@ -239,15 +254,11 @@ def test_walk_forward_rolling_windows_fixed() -> None:
 
 
 def test_cpcv_result_has_required_fields() -> None:
-    prices = _prices(40, seed=11)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(40, seed=11)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     res = CPCVEngine().run(
         signals=[_MomentumSignal()],
         data=data,
@@ -264,15 +275,11 @@ def test_cpcv_result_has_required_fields() -> None:
 
 
 def test_cpcv_n_paths_correct(monkeypatch: pytest.MonkeyPatch) -> None:
-    prices = _prices(45, seed=12)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(45, seed=12)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     model = CostModel(spread_bps={"AAA": 0.0, "BBB": 0.0})
     cap = int(cpcv_mod._MAX_COMBINATIONS)
     n_groups, k_test = 4, 2
@@ -289,10 +296,10 @@ def test_cpcv_n_paths_correct(monkeypatch: pytest.MonkeyPatch) -> None:
     assert res.n_paths == min(math.comb(n_groups, k_test), cap)
 
     monkeypatch.setattr(cpcv_mod, "_MAX_COMBINATIONS", 4)
-    prices2 = _prices(40, seed=13)
-    data2 = {"prices": prices2}
-    start2 = prices2.index[0].date()
-    end2 = prices2.index[-1].date()
+    data2 = _price_data(40, seed=13)
+    cal2 = _calendar_from_data(data2)
+    start2 = cal2[0].date()
+    end2 = cal2[-1].date()
     res2 = CPCVEngine().run(
         signals=[_MomentumSignal()],
         data=data2,
@@ -307,15 +314,11 @@ def test_cpcv_n_paths_correct(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cpcv_oos_sharpe_is_series() -> None:
-    prices = _prices(38, seed=14)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(38, seed=14)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     res = CPCVEngine().run(
         signals=[_MomentumSignal()],
         data=data,
@@ -330,15 +333,11 @@ def test_cpcv_oos_sharpe_is_series() -> None:
 
 
 def test_cpcv_pbo_between_zero_and_one() -> None:
-    prices = _prices(42, seed=15)
-    data = {"prices": prices}
-    start = prices.index[0].date()
-    end = prices.index[-1].date()
-    cfg = {
-        "prices_key": "prices",
-        "asset_classes": {"AAA": "equity", "BBB": "equity"},
-        "vol_window": 5,
-    }
+    data = _price_data(42, seed=15)
+    cal = _calendar_from_data(data)
+    start = cal[0].date()
+    end = cal[-1].date()
+    cfg = _default_cfg()
     res = CPCVEngine().run(
         signals=[_MomentumSignal()],
         data=data,

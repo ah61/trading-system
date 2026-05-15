@@ -3,9 +3,11 @@ signal:
   asset_class: rates
   signal_type: trend
   frequency: daily
+
 parameters:
-  ticker: TLT
+  # Catalogue variable name (DD-007). The underlying Yahoo ticker (TLT)
+  # lives in configs/data/variables/market.yaml under TLT_CLOSE.
+  variable: TLT_CLOSE
   fast_window: 50
   slow_window: 200
   scale_by_distance: false
-
