@@ -1,8 +1,8 @@
 # DESIGN_DECISIONS.md
 # Design Rationale and Open Questions
 
-**Version:** 0.1
-**Last Updated:** 2026-05-14
+**Version:** 0.2
+**Last Updated:** 2026-05-15
 **Status:** Living document — append decisions, do not rewrite history.
 
 ---
@@ -405,6 +405,100 @@ change.
   template.
 
 ---
+
+## DD-009 — Backtest engine boundary: hybrid Series/panel contract
+**Date:** 2026-05-15
+**Status:** Decided (locks 5.7 engine refactor)
+
+### Context
+Milestone 5.7 changed the signal layer contract to `Dict[str, pd.Series]` keyed
+by catalogue variable name (per DD-006 catalogue stateful design and DD-007
+naming). The natural follow-on question: should the *entire* downstream
+pipeline (portfolio sizing, construction, costs, results) also be rewritten to
+consume `Dict[str, pd.Series]`, or should the new contract stop at the engine
+boundary while the portfolio layer keeps its existing wide-DataFrame panel?
+
+Two candidate refactors were on the table:
+
+- **Option A — Hybrid.** Engine's public API accepts `Dict[str, pd.Series]`.
+  Inside the engine, just before the handoff to `PortfolioConstructor.construct`,
+  the engine assembles a wide DataFrame panel (rows = dates, columns =
+  instruments) from the dict. The portfolio layer is unchanged.
+- **Option B — Series throughout.** Rewrite `PositionSizer.volatility_target`,
+  `PositionSizer.risk_parity`, `PortfolioConstructor.construct`, and the
+  `CostModel.apply_costs` call paths to consume `Dict[str, pd.Series]` directly.
+  No panel anywhere in the codebase.
+
+### Decision
+**Option A — hybrid.** Engine accepts Series on its public API and assembles
+the panel internally at one explicit boundary (`BacktestEngine._assemble_price_panel`).
+The portfolio layer continues to consume the wide DataFrame panel.
+
+Knock-on changes that landed with this decision:
+- `portfolio_config["prices_key"]` removed in favour of
+  `portfolio_config["instruments"]` (explicit list of catalogue variable names
+  representing tradeable instruments). The engine uses this list to drive the
+  panel assembly.
+- `_assemble_price_panel` is the single function that bridges the two shapes,
+  with an explicit comment marking it as the contract boundary.
+
+### Rationale
+**Why not Option B (Series throughout):**
+
+1. **Cross-sectional math is naturally panel-shaped.** Vol targeting and risk
+   parity compute things like "the covariance matrix of the cross-section of
+   instruments" or "the inverse-vol weights across all instruments today." Those
+   operations are one-liners on a DataFrame panel and a multi-line loop on a
+   dict of Series. Rewriting them costs lines, adds bugs, and improves nothing.
+2. **Internal panel rebuild is zero-benefit ceremony.** If the portfolio layer
+   accepts Series but then rebuilds a panel internally on every call, we have
+   all the cost of the refactor and none of the benefit. The shape difference
+   is real; pretending it isn't just moves the bridge code.
+3. **The 5.7 contract is about signal-author ergonomics.** The point of the
+   Series dict is that *signal authors* shouldn't think about wide panels of
+   irrelevant instruments — they declare exactly the variables they consume
+   by name. Portfolio code doesn't have that property: it operates on the full
+   cross-section by definition. The two layers have legitimately different
+   shape needs.
+4. **Working code is more valuable than uniform code.** The portfolio layer
+   has tests and works. A speculative rewrite churns code that isn't broken,
+   in service of a uniformity that doesn't pay off downstream.
+
+**Why not skip the engine refactor entirely (keep the old contract):**
+
+The signal layer had to change for 5.7 (catalogue contract). With the signal
+layer on Series, the engine had to translate *somewhere* — either at the
+boundary into the engine (option A) or buried in every signal's compute()
+call (the worst of both worlds). Putting the translation at one named function
+keeps the bridge code findable and the rest of the engine clean.
+
+### What's explicitly NOT decided here
+- Whether the portfolio layer will *ever* move to Series. Reserved as Milestone
+  5.16 (placeholder). Not scheduled, not promised, low priority. Do not do
+  speculatively. Wait for a concrete need — e.g., a signal whose forward returns
+  are per-variable and the engine has to consume them without coercing through
+  a panel.
+
+### Cross-references
+- **ARCHITECTURE.md §5** — the formal data contract specifications, including
+  the "Engine ↔ Portfolio internal boundary" subsection that names
+  `_assemble_price_panel`.
+- **CONVENTIONS.md §3.6** — the layer-by-layer data shape rule for new code.
+- **PROGRESS.md §5.7 (continued)** — the implementation record and the
+  "Deliberately NOT changed" rationale block for the portfolio layer.
+- **ROADMAP.md Milestone 5.16** — the placeholder for the (not scheduled)
+  Series-throughout refactor.
+
+### Open items
+- Engine currently prices the portfolio off the first instrument in the
+  `instruments` list. This was the pre-5.7 behaviour (single-column reference)
+  and is preserved by 5.7, not introduced by it. Multi-instrument portfolio
+  returns weighted per-instrument is a future refactor; not blocked on the
+  Series question.
+
+---
+
+# Open Questions
 
 These are items raised but not resolved. Each should be revisited at the
 indicated milestone.

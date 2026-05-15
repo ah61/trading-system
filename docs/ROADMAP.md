@@ -1,8 +1,8 @@
 # ROADMAP.md
 # Build Phases and Completion Criteria
 
-**Version:** 0.3
-**Last Updated:** 2026-05-14
+**Version:** 0.4
+**Last Updated:** 2026-05-15
 **Rule:** Do not begin a phase until all completion criteria for the previous phase are met.
 Completion means: tests pass, data contracts are verified, and the module has been
 reviewed in Claude.ai against ARCHITECTURE.md.
@@ -259,60 +259,43 @@ fixes in subsequent milestones.
 
 ---
 
-### Milestone 5.6 — Output Container + Reporting Hygiene
+### Milestone 5.6 — Output Container + Reporting Hygiene ✅
 **Goal:** Structured output storage with reproducibility manifests; no more
 overwriting reports.
 
-**Problem:** Currently `reports/signal_evaluation_phase1.md` gets clobbered on
-every run. No way to compare past runs, reproduce specific results, or track
-how outputs change over time. This blocks the modeling work in Phase 5+.
+**Completed 2026-05-15.**
 
-**Tasks:**
-- [ ] New module `src/reporting/output_manager.py` with `OutputManager` class
-- [ ] Folder structure: `reports/{variables,exploratory,strategies}/{timestamp}_{id}/`
-- [ ] Each output directory contains: results files + `manifest.json` (git
-      commit, config snapshot, data versions, runtime metadata)
-- [ ] Auto-generated `reports/index.csv` listing all runs with key metadata
-      (git-tracked for visibility)
-- [ ] Migrate existing `reports/signal_evaluation_phase1.md` to
-      `reports/variables/baseline/`
-- [ ] Update `scripts/evaluate_signals.py` to use `OutputManager`
-- [ ] Tests: `tests/test_output_manager.py` for manifest correctness, naming,
-      git capture
-
-**Completion criteria:**
-- [ ] Two consecutive runs produce two distinct output directories
-- [ ] `manifest.json` contains git commit and is reproducible from manifest alone
-- [ ] `reports/index.csv` populated and committed
+`OutputManager` routes runs into `reports/{exploratory,variables,strategies}/`
+with timestamped folders, `manifest.json` (git commit, dirty flag, config
+snapshot), and per-kind `index.csv`. Five reusable plot functions in
+`src/reporting/plots.py`. `scripts/evaluate_signals.py` refactored to use the
+manager. 28 new tests (119 → 147 passing). See PROGRESS.md §5.6 and
+CONVENTIONS.md §8 for details.
 
 ---
 
-### Milestone 5.7 — Variable Catalogue Wired Into Pipeline
+### Milestone 5.7 — Variable Catalogue Wired Into Pipeline ✅
 **Goal:** Make the `VariableCatalog` (5.3 registry) actually serve data, not
 just declare it. Cache-first lookup with transformation support.
 
-**Problem:** The catalogue currently exists as a YAML registry with metadata,
-but signal code still reads tickers directly from signal configs. Data flow
-is duplicated across every signal. No central place to ask "give me variable X
-at frequency Y."
+**Completed 2026-05-15** (in two checkpoints, see PROGRESS.md §5.7).
 
-**Tasks:**
-- [ ] Promote `VariableCatalog` from stateless registry to stateful runtime
-      object holding DataStore + sources (see DESIGN_DECISIONS.md DD-006)
-- [ ] Implement `catalogue.get(variable_name, frequency)` with cache-first
-      lookup: derived → raw → fetch
-- [ ] Refactor `scripts/evaluate_signals.py` to obtain data via catalogue
-- [ ] Refactor signal `required_data` declarations to use catalogue variable
-      names, not source-specific tickers
-- [ ] Audit frequency layer behavior per DD-004 (multi-frequency policy)
-- [ ] Tests: catalogue.get round-trips, cache-first behavior, frequency mismatch
-      handling
+Catalogue promoted from stateless registry to stateful runtime object holding
+DataStore + sources. `catalogue.get(name, frequency, start, end) -> pd.Series`
+returns variables with cache-first lookup. Template-based universe expansion
+(`configs/data/universes/*.yaml`) per DD-008. Signal interface changed to
+`Dict[str, pd.Series]` keyed by catalogue variable name (DD-007). Backtest
+engine accepts the Series contract on its public API and translates to the
+portfolio-layer panel at one explicit boundary (`_assemble_price_panel`) —
+"option A hybrid" per DD-009. 4 new signal tests (147 → 151 passing).
 
-**Completion criteria:**
-- [ ] Three existing signals (FX Carry, Rates Trend, Equity Momentum) use the
-      catalogue for all data access
-- [ ] No direct DataStore or source calls remain in signal code
-- [ ] `tests/test_variable_catalog.py` covers stateful operations
+**Deferred (small, isolated, not blocking — pick up when convenient):**
+- [ ] `tests/test_variable_catalog.py` additions for the stateful API:
+      catalogue.get returning Series at native frequency, resampling on
+      `get()`, universe expansion producing per-ticker specs.
+- [ ] `force_refresh: bool` plumbed through `VariableCatalog.get()` and the
+      `--refresh` CLI flag in `scripts/evaluate_signals.py` (currently
+      advisory — to force a refresh, delete `data/raw/raw.duckdb`).
 
 ---
 
@@ -486,14 +469,35 @@ Expected effect may be muted vs literature.
 
 ---
 
+### Milestone 5.16 — Portfolio Layer Series Unification (PLACEHOLDER, LOW PRIORITY)
+**Status:** ⬜ Not scheduled. Placeholder only.
+
+**Context:** 5.7 landed the signal layer on `Dict[str, pd.Series]` per the
+catalogue contract, but deliberately kept the portfolio layer
+(`PositionSizer`, `PortfolioConstructor`, `CostModel`) on the wide
+DataFrame panel. The engine translates between the two shapes at one
+explicit boundary (`BacktestEngine._assemble_price_panel`). See
+DESIGN_DECISIONS.md DD-009 for the rationale.
+
+**If ever needed:** rewrite the portfolio layer to consume `Dict[str, pd.Series]`
+end-to-end. Cost: rewriting `PositionSizer.volatility_target`,
+`PositionSizer.risk_parity`, `PortfolioConstructor.construct`, and the
+`CostModel.apply_costs` call paths. Benefit: contract uniformity end-to-end.
+
+**Do not do speculatively.** Wait for a concrete need — e.g., a signal that
+produces per-variable forward returns and the engine needs to consume them
+without coercing through a panel.
+
+---
+
 ### Phase 5 Completion Criteria
-- [ ] All existing tests still pass (current: 119)
-- [ ] Frequency layer working — no manual resampling required in evaluation scripts ✅ (5.2)
-- [ ] Variable catalogue stateful and serving data via cache-first lookup (5.7)
+- [ ] All existing tests still pass (current: 151)
+- [x] Frequency layer working — no manual resampling required in evaluation scripts (5.2)
+- [x] Variable catalogue stateful and serving data via cache-first lookup (5.7)
 - [ ] Transformation pipeline executes declared transformations and persists derived
       variables (5.8)
-- [ ] Output container in place with reproducibility manifests (5.6)
-- [ ] FX Carry re-evaluated on full G10 ✅ (5.5)
+- [x] Output container in place with reproducibility manifests (5.6)
+- [x] FX Carry re-evaluated on full G10 (5.5)
 - [ ] Universe expansion complete (5.10)
 - [ ] Rates Trend regime filter implemented and evaluated (5.11)
 - [ ] IBSource integrated for FX (5.12)
@@ -515,6 +519,12 @@ Expected effect may be muted vs literature.
 - IDEALPRO FX subscription active ✅ (2026-05-14)
 - IBSource module built in Milestone 5.12 (FX historical/real-time)
 - Market-convention FX label translation layer (per DESIGN_DECISIONS.md DD-005)
+- **End-to-end backtest driver** — `scripts/backtest_strategy.py` mirroring
+  the structure of `scripts/evaluate_signals.py` but calling
+  `BacktestEngine.run` (or `WalkForwardEngine.run`). 5.7 finding: the
+  `catalogue → engine → portfolio` path has unit-test coverage but no
+  end-to-end runner. Tests passing ≠ system runs end to end. This script is
+  what proves the full pipeline works on real data before any paper trading.
 
 ### Milestone 6.1 — IBSource Live Feed Extension
 **Builds on:** Milestone 5.12 `IBSource` (which covers FX historical).
