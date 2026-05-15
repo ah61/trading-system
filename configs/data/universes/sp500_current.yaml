@@ -1,0 +1,41 @@
+# Example universe YAML using the template-based expansion introduced in 5.7
+# (see DESIGN_DECISIONS.md DD-008).
+#
+# On catalogue load, this file expands into one VariableSpec per ticker, each
+# named per `variable_name_pattern` (e.g. AAPL → AAPL_CLOSE). Signals reference
+# variables by name; the catalogue resolves them to Yahoo fetches.
+#
+# To migrate the existing `configs/universes/sp500_current.yaml`:
+# 1. Move that file's `tickers:` list into this file (keep them inside the
+#    `tickers:` block below).
+# 2. Delete the old `configs/universes/sp500_current.yaml`.
+# 3. The Equity Momentum signal config should reference `universe:
+#    sp500_current` and that string maps to this file's basename
+#    (configs/data/universes/sp500_current.yaml).
+#
+# When 5.10 expands the universe to ~55 sector-balanced stocks, edit the
+# `tickers:` list. No code changes needed.
+
+template:
+  layer: raw
+  source: yahoo
+  frequency: daily
+  instrument_type: equity
+  adjustment: auto_adjust
+  description: "S&P 500 member close price (auto-adjusted)"
+  variable_name_pattern: "{ticker}_CLOSE"
+
+# Placeholder list — REPLACE with actual S&P 500 universe before running.
+# The current `configs/universes/sp500_current.yaml` has the 10-ticker list
+# we've been using; copy those tickers here when migrating.
+tickers:
+  - AAPL
+  - MSFT
+  - JPM
+  - JNJ
+  - XOM
+  - WMT
+  - PG
+  - BAC
+  - CVX
+  - HD

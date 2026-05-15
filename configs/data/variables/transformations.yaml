@@ -38,7 +38,7 @@ GS10_GS2_SLOPE:
 CPI_YOY:
   domain: macro
   layer: transformed
-  source_variable: CPIAUCSL
+  source_variable: CPI_HEADLINE
   transformation: yoy_pct_change
   description: CPI year-on-year percentage change
   frequency: monthly

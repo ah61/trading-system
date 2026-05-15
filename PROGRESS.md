@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.6 — Output Container + Reporting Hygiene (next) |
-| **Tests** | 119 passing |
-| **Next action** | Begin Milestone 5.6 |
+| **Active milestone** | 5.7 — Variable Catalogue (in progress, partial) |
+| **Tests** | 147 passing |
+| **Next action** | Continue 5.7 in new conversation — see "5.7 handoff note" below |
 
 ---
 
@@ -247,8 +247,8 @@ restructured. Documented in `DESIGN_DECISIONS.md`. New milestone list:
 
 | # | Milestone | Status |
 |---|---|---|
-| 5.6 | Output Container + Reporting Hygiene | ⬜ next |
-| 5.7 | Variable Catalogue: stateful lookup | ⬜ |
+| 5.6 | Output Container + Reporting Hygiene | ✅ complete |
+| 5.7 | Variable Catalogue: stateful lookup | 🔄 partial (catalogue done, signal refactor deferred) |
 | 5.8 | Transformation Pipeline + Derived Variable Persistence | ⬜ |
 | 5.9 | FX Carry Quarterly Horizon Experiment | ⬜ |
 | 5.10 | Universe Expansion (FX EM, equities, rates) | ⬜ |
@@ -256,6 +256,92 @@ restructured. Documented in `DESIGN_DECISIONS.md`. New milestone list:
 | 5.12 | IBSource (FX focus) | ⬜ |
 | 5.13 | Forward-Spot Basis Carry Signal | ⬜ |
 | 5.14 | Vol Conditioning Experiment on FX Carry | ⬜ |
+
+### Milestone 5.6 — Output Container + Reporting Hygiene ✅
+
+**Completed 2026-05-15.**
+
+- [x] `src/reporting/manifest.py` — `Manifest` dataclass + `capture_manifest()`
+      that grabs git commit, dirty state, timestamp, Python/platform, and
+      config snapshot. JSON read/write round-trip.
+- [x] `src/reporting/output_manager.py` — `OutputManager` class with three
+      factory methods (`new_exploratory`, `new_variable`, `new_strategy`)
+      routing to `reports/{exploratory,variables,strategies}/{ts}_{name}/`.
+      Each run gets a `plots/` subdir, manifest, and index.csv entry.
+- [x] `src/reporting/plots.py` — 5 reusable plot functions: cumulative returns,
+      IC over time, drawdown, signal heatmap, correlation matrix. PNG default
+      at 150 DPI; SVG via `save_format` parameter.
+- [x] `notebooks/README.md` — naming convention + lifecycle rules
+      (research stays in notebooks; promoted code goes to `src/` with tests).
+- [x] `.gitignore` updated: reports content gitignored, but
+      `reports/variables/index.csv` and `reports/strategies/index.csv` tracked
+      so formal runs are visible at a glance.
+- [x] `scripts/evaluate_signals.py` refactored to write via
+      `OutputManager.new_variable()`. Each run now produces a
+      `reports/variables/{ts}_signal_evaluation/` folder with manifest,
+      `results.md`, and `results.csv`. Legacy
+      `reports/signal_evaluation_phase1.md` still written for backward compat.
+- [x] Existing `reports/signal_evaluation_phase1.md` migrated to
+      `reports/variables/baseline/results.md`.
+- [x] 28 new tests across `test_manifest.py`, `test_output_manager.py`,
+      `test_plots.py` (119 → 147 passing).
+
+### Milestone 5.7 — Variable Catalogue (in progress, partial)
+
+**Status:** Stable subset shipped 2026-05-15. The breaking signal-interface
+change is deferred to a new conversation to avoid hitting the context limit
+mid-refactor.
+
+**Shipped in this checkpoint:**
+- [x] DESIGN_DECISIONS.md DD-007 (variable naming convention)
+- [x] DESIGN_DECISIONS.md DD-008 (template-based universe handling)
+- [x] `CPIAUCSL` → `CPI_HEADLINE` rename in `configs/data/variables/macro.yaml`
+- [x] Updated `source_variable` reference in `configs/data/variables/transformations.yaml`
+- [x] `VariableCatalog` promoted to stateful: accepts `sources` and `store`,
+      adds `get(name, frequency, start, end) -> pd.Series` for raw variables
+      with native or resampled frequency
+- [x] `VariableCatalog.get()` (5.3, returns VariableSpec) renamed to `get_spec()`
+      to free the `get()` name for data access
+- [x] Universe expansion: `configs/data/universes/*.yaml` template-based,
+      auto-expanded into per-ticker VariableSpec at load time
+- [x] Backward-compatible: existing 14 test_variable_catalog.py tests still
+      pass against the new code (with one trivial rename `get → get_spec`)
+- [x] `configs/data/universes/sp500_current.yaml` example with the new template
+      format (placeholder ticker list — copy actual universe contents on migrate)
+
+**NOT shipped yet — defer to next conversation:**
+- [ ] `src/signals/base.py` interface change (Dict[str, pd.DataFrame] → Dict[str, pd.Series])
+- [ ] `src/signals/{rates/trend, fx/carry, equities/momentum}.py` refactor
+- [ ] `configs/signals/rates_trend.yaml` (ticker → variable)
+- [ ] `configs/signals/fx_carry.yaml` (rate_series RHS becomes catalogue variable names)
+- [ ] `scripts/evaluate_signals.py` uniform catalogue usage
+- [ ] `tests/test_signals.py` refactor (~15 tests use new Series-based interface)
+- [ ] New tests for catalogue stateful API (catalogue.get, universe expansion, resampling)
+
+**Handoff note for next session:**
+
+Start the next conversation with:
+
+> Continuing Milestone 5.7. The catalogue is now stateful (get/get_spec split,
+> universe expansion working) and backward-compatible — 147 tests still pass.
+> The breaking signal-interface change is the remaining work. See PROGRESS.md
+> §5.7 for the deferred items list.
+
+You'll need to upload (or I'll need to re-read) the current versions of:
+- `src/signals/base.py`
+- `src/signals/rates/trend.py`
+- `src/signals/fx/carry.py`
+- `src/signals/equities/momentum.py`
+- `tests/test_signals.py`
+- `scripts/evaluate_signals.py`
+- `configs/signals/rates_trend.yaml`
+- `configs/signals/fx_carry.yaml`
+- `configs/universes/sp500_current.yaml` (or wherever the actual ticker list lives)
+
+I have the refactored versions of base/trend/carry/momentum already drafted in
+my notes — I'll re-derive them and verify against the uploaded current state.
+
+---
 
 ### IB account setup ✅ (2026-05-14)
 

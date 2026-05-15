@@ -54,7 +54,7 @@ T10YIE:
   unit: percent
   use_alfred_vintage: false
 
-CPIAUCSL:
+CPI_HEADLINE:
   domain: macro
   layer: raw
   source: FRED

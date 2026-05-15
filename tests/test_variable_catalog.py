@@ -50,7 +50,7 @@ def test_load_minimal_catalog(tmp_path: Path) -> None:
     cat = VariableCatalog.load(tmp_path)
     assert "DFF" in cat
     assert len(cat) == 1
-    assert cat.get("DFF").layer == "raw"
+    assert cat.get_spec("DFF").layer == "raw"
 
 
 def test_load_three_layers(tmp_path: Path) -> None:

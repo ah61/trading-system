@@ -270,7 +270,141 @@ supposed to eliminate.
 
 ---
 
-## Open questions (not yet decided)
+## DD-007 — Variable naming convention
+**Date:** 2026-05-15
+**Status:** Decided
+
+### Context
+When introducing catalogue variables in 5.7, we needed a rule for how to name
+them. Three candidates: use vendor IDs as variable names; rename everything to
+human names; or a mixed rule. After discussion we agreed the rule needs to
+hold across vendor systems (FRED, Yahoo, Bloomberg, IB) and over the project's
+lifetime as more variables are added.
+
+### Decision
+
+**Variable names are always chosen by the project**, never inherited from
+vendors as policy. The fact that a chosen name happens to match a vendor ID
+(e.g. `DFF`) is incidental, not a rule. Vendor identifiers always live inside
+the variable's spec, never as the variable name conceptually.
+
+**Convention (UPPER_SNAKE_CASE, source-agnostic, domain-recognisable):**
+
+| Category | Naming rule | Examples |
+|---|---|---|
+| Headline macro (well-known short ID) | Choose the same string as the vendor where it's already a clean domain term | `DFF`, `GS10`, `UNRATE`, `INDPRO`, `M2SL`, `SPX` |
+| Cryptic vendor IDs | Choose a clean human name; vendor ID in spec | `CPI_HEADLINE` (not `CPIAUCSL`), `EUR_RATE` (not `IR3TIB01EZM156N`) |
+| Specific instruments | `{ASSET}_{FIELD}` | `TLT_CLOSE`, `EUR_USD_SPOT`, `AAPL_CLOSE` |
+| Transformed variables | `{INPUT}_{TRANSFORM}_{PARAMS}`, left-to-right application order | `DFF_ZSCORE_252`, `US_REAL_GDP_DLOG`, `TLT_CLOSE_VOL_63`, `US_REAL_GDP_DLOG_MEAN_4` |
+| Derived (signals, regimes) | Descriptive | `FX_CARRY_SIGNAL`, `REGIME_RATES_TREND` |
+
+**Transformation naming details:**
+- Suffixes read left-to-right as the order of application. `US_REAL_GDP_DLOG_MEAN_4`
+  means "real GDP → log-difference → 4-period rolling mean."
+- Suffixes describe transformations we did, not properties of the source.
+  If FRED provides a series already seasonally adjusted, don't add `_SA` — the
+  SA status lives in the spec description. Add `_SA` only when we performed
+  seasonal adjustment ourselves.
+- If a transformation chain produces an unwieldy name (4+ suffixes), declare
+  an intermediate transformed variable for clarity rather than naming the chain.
+
+### Rationale
+**Why not just use vendor IDs.** Some vendor IDs are bookkeeping artifacts
+(`CPIAUCSL` carries a FRED-specific `AUCSL` suffix nobody says aloud). Some
+are deliberately obscure (`IR3TIB01EZM156N`). Bloomberg has similar issues
+(`EUR003M Index` is clean-ish but not how people talk). Vendor IDs cannot
+serve as a universal naming rule.
+
+**Why not rename everything aggressively.** When a vendor ID already matches
+common usage (`DFF`, `GS10`, `SPX`), renaming it makes the project harder to
+read, not easier. The rule "choose a good name" lets us pick `DFF` when `DFF`
+is good and `CPI_HEADLINE` when `CPIAUCSL` is bad.
+
+**Why "always chosen by us" as the framing.** Functionally identical to
+"inherit if clean, rename if cryptic," but cleaner conceptually: there's only
+one rule (choose a good name), not two (inherit OR rename). Removes the
+question "is this vendor ID clean enough to inherit?" — there's no inheriting,
+only choosing.
+
+### Open items
+- For variables where multiple "common" names exist (e.g. 10Y Treasury yield:
+  `GS10`, `DGS10`, `USGG10YR`), document the choice in the spec's
+  `description` and any common aliases. No automated alias system planned.
+
+---
+
+## DD-008 — Bulk universe handling
+**Date:** 2026-05-15
+**Status:** Decided
+
+### Context
+Equity Momentum operates over 50+ tickers. Declaring each as a separate
+variable spec in `market.yaml` is verbose and duplicative. The alternative
+considered — implicit/conventional inference inside the catalogue ("any
+undeclared ticker is a Yahoo equity by default") — was rejected as too magical.
+
+### Decision
+
+**Universe files declare a variable template plus a ticker list. The
+catalogue expands the template into one explicit variable spec per ticker on
+load.** Generated specs are first-class: they appear in `catalogue.names()`,
+are inspectable via `catalogue.get_spec()`, and obey the same source/frequency
+contracts as hand-declared variables.
+
+Example (`configs/data/universes/sp500_sector_balanced.yaml`):
+```yaml
+template:
+  layer: raw
+  source: yahoo
+  frequency: daily
+  instrument_type: equity
+  adjustment: auto_adjust
+  variable_name_pattern: "{ticker}_CLOSE"
+
+tickers:
+  - AAPL
+  - MSFT
+  - JPM
+  # ... 50 more
+```
+
+On load, the catalogue produces 50 variable specs, each named per the pattern
+(`AAPL_CLOSE`, `MSFT_CLOSE`, ...) and identical in structure to a hand-declared
+spec in `market.yaml`.
+
+### Rationale
+**Why not implicit inference.** Inference fails the explicitness test: signal
+code referencing `data["AAPL_CLOSE"]` should have a discoverable definition.
+With inference, there's no spec to inspect — a future contributor has to read
+catalogue source to understand what `AAPL_CLOSE` is. Templates preserve
+explicitness while eliminating boilerplate.
+
+**Why not per-ticker hand-declaration.** 50+ entries with identical structure
+is busywork that obscures the actual content (the ticker list). It also makes
+universe-level changes (e.g. switching the entire equity universe from Yahoo
+to IB) require editing 50 entries instead of one template.
+
+**Why templates are first-class.** Tests can mock universe expansion. Catalogue
+tools (lineage, used_by, names) work uniformly across hand-declared and
+template-expanded variables. Switching universes is a YAML edit, not a code
+change.
+
+### Implementation notes
+- Universe files live in `configs/data/universes/`.
+- The catalogue loads universe files after the main variable files. Each
+  expanded spec is treated as if it were declared in `market.yaml`.
+- Naming pattern is `variable_name_pattern: "{ticker}_CLOSE"` (or `{ticker}_PX`,
+  etc.) using `str.format()` substitution.
+- Validating no name collisions between hand-declared and template-expanded
+  specs happens during catalogue construction; collision is a `CatalogError`.
+
+### Open items
+- Template-expanded specs currently only support a single source. Multi-source
+  templates (for when EM FX comes from IB-preferred-then-Yahoo) are a future
+  extension; the schema can grow to accept a `sources:` list inside the
+  template.
+
+---
 
 These are items raised but not resolved. Each should be revisited at the
 indicated milestone.
