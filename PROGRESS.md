@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.5 — G10 FX Expansion ✅ complete |
+| **Active milestone** | 5.6 — Output Container + Reporting Hygiene (next) |
 | **Tests** | 119 passing |
-| **Next action** | Begin Milestone 5.6 (Equity Universe Expansion) |
+| **Next action** | Begin Milestone 5.6 |
 
 ---
 
@@ -239,15 +239,37 @@ Observations:
 - This is a real signal-quality finding, not a methodology bug. Phase 5 is
   infrastructure; signal-quality testing comes next.
 
-### Milestone 5.6 — Equity Universe Expansion ⬜
-- [ ] Expand to 200-stock universe (`configs/universes/sp500_current.yaml`)
-- [ ] Re-evaluate Equity Momentum at monthly frequency (using frequency layer)
+### Phase 5 reordering (2026-05-14)
 
-### Milestone 5.7 — Rates Trend Regime Filter ⬜
-- [ ] Add `TLT_VOL_63D` transformation
-- [ ] Add `REGIME_RATES_TREND` derived indicator
-- [ ] Add `regime_filter` param to `RatesTrendSignal.compute()`
-- [ ] Re-evaluate full + sub-periods
+Original Phase 5 had only three remaining milestones (5.6 universe expansion,
+5.7 regime filter). After a design discussion, the plan was substantially
+restructured. Documented in `DESIGN_DECISIONS.md`. New milestone list:
+
+| # | Milestone | Status |
+|---|---|---|
+| 5.6 | Output Container + Reporting Hygiene | ⬜ next |
+| 5.7 | Variable Catalogue: stateful lookup | ⬜ |
+| 5.8 | Transformation Pipeline + Derived Variable Persistence | ⬜ |
+| 5.9 | FX Carry Quarterly Horizon Experiment | ⬜ |
+| 5.10 | Universe Expansion (FX EM, equities, rates) | ⬜ |
+| 5.11 | Rates Trend Regime Filter (was 5.7) | ⬜ |
+| 5.12 | IBSource (FX focus) | ⬜ |
+| 5.13 | Forward-Spot Basis Carry Signal | ⬜ |
+| 5.14 | Vol Conditioning Experiment on FX Carry | ⬜ |
+
+### IB account setup ✅ (2026-05-14)
+
+Prerequisites for Milestone 5.12 completed:
+
+- Paper account: username `phbojg566`, account number `DUP730772`
+- Real-time market data sharing: enabled (paper ↔ live account)
+- Subscriptions active (all fee-waived): IDEALPRO FX, US Real-Time NCS, US/EU Bond Quotes
+- IB Gateway installed, paper login tested, status all green
+- API Settings: port 7497, ActiveX/Socket Clients enabled, message log file enabled,
+  Read-Only API unchecked, Trusted IPs empty (localhost-only)
+
+Outstanding for later: CME futures real-time subscription (~$10/month) needed for
+Phase 7.2 Treasury futures work.
 
 ---
 

@@ -1,17 +1,23 @@
 # ARCHITECTURE.md
 # Systematic Multi-Asset Trading System
 
-**Version:** 0.2
+**Version:** 0.3
 **Last Updated:** 2026-05-14
 **Status:** Phases 0–4 implemented; Phase 5 (Signal Hardening) in progress
+
+**Companion documents:**
+- `ROADMAP.md` — what gets built when
+- `DESIGN_DECISIONS.md` — why the design is what it is (rationale)
+- `PROGRESS.md` — current execution state and known issues
 
 **Vocabulary note (v0.2):** This document uses **"Stage 1"** and **"Stage 2"**
 to describe the data-quality tier of the system — Stage 1 is the current
 public-data implementation (FRED, Yahoo, ETF proxies); Stage 2 is the
 post-Bloomberg / point-in-time upgrade. These map to **Phases 0–6** and
-**Phase 7** respectively in `ROADMAP.md`. Previous versions of this document
-used "Phase 1 / Phase 2" for these tiers, which collided with the ROADMAP
-phase numbers. All such references have been renamed in v0.2.
+**Phase 7** respectively in `ROADMAP.md`.
+
+**v0.3 change:** Modeling layer split into three sublayers (conditioning,
+predictive, combination). See new Section 4 below.
 
 ---
 
@@ -80,25 +86,59 @@ If a design decision is made that changes this document, update it immediately a
 │   DataSource (base)                                      │
 │   ├── FREDSource        (macro, rates, Alfred vintages)  │
 │   ├── YahooSource       (equities, ETF proxies)          │
-│   ├── IBSource          (live feed, paper trading)       │
+│   ├── IBSource          (FX, futures; Milestone 5.12+)   │
 │   └── QuandlSource      (futures, Stage 2)               │
 │                                                          │
 │   DataCleaner           (outliers, fills, adjustments)   │
 │   DataStore             (DuckDB, raw/adjusted/derived)   │
+│   CachedSource          (wrapper: cache-first fetches)   │
 └────────────────────────┬────────────────────────────────┘
                          │  standard DataFrames
 ┌────────────────────────▼────────────────────────────────┐
-│                  LAYER 2: SIGNAL ENGINE                  │
+│                LAYER 1.5: DATA CATALOGUE                 │
 │                                                          │
+│   VariableCatalog (stateful)                             │
+│   ├── get(variable_name, frequency) → pd.Series          │
+│   ├── lookup logic: derived → raw → fetch-and-store      │
+│   ├── transformation execution (lazy, persisted)         │
+│   └── lineage tracking, source preference                │
+│                                                          │
+│   All higher layers consume data ONLY via the catalogue. │
+└────────────────────────┬────────────────────────────────┘
+                         │  variables (raw, transformed, derived, fitted)
+┌────────────────────────▼────────────────────────────────┐
+│            LAYER 2a: CONDITIONING                        │
+│  (regime, vol filter, market-state classifications;      │
+│   outputs are time series consumed by signals as         │
+│   multipliers/filters/routers)                           │
+├──────────────────────────────────────────────────────────┤
+│            LAYER 2b: PREDICTIVE MODELS                   │
+│  (fitted models: nowcasts, factor models, ML predictions;│
+│   outputs are derived variables that flow back into the  │
+│   catalogue and may serve as signals or signal inputs)   │
+├──────────────────────────────────────────────────────────┤
+│            LAYER 2c: SIGNALS                             │
 │   Signal (base)                                          │
 │   ├── compute(data) → signal_series                      │
 │   ├── evaluate(signal, returns) → SignalMetrics          │
 │   └── metadata (params, asset class, frequency)          │
 │                                                          │
-│   SignalLibrary         (registry of all signals)        │
 │   SignalEvaluator       (IC, ICIR, Sharpe, decay)        │
 │   SignalCorrector       (DSR, PBO, Hansen SPA)           │
-│   SignalCombiner        (equal weight, IC-weight, MVO)   │
+│                                                          │
+│   Signals consume conditioning outputs (2a) and          │
+│   predictive outputs (2b) as data via the catalogue.     │
+└────────────────────────┬────────────────────────────────┘
+                         │  individual signals
+┌────────────────────────▼────────────────────────────────┐
+│            LAYER 2d: COMBINATION                         │
+│   SignalCombiner                                         │
+│   ├── equal-weight (baseline)                            │
+│   ├── IC-weighted                                        │
+│   ├── correlation-penalised                              │
+│   └── MVO across signals (Stage 2)                       │
+│                                                          │
+│   Conditioning weights from 2a apply here as well.       │
 └────────────────────────┬────────────────────────────────┘
                          │  combined signal series
 ┌────────────────────────▼────────────────────────────────┐
@@ -117,11 +157,32 @@ If a design decision is made that changes this document, update it immediately a
 │   WalkForwardEngine     (anchored + rolling)             │
 │   CPCVEngine            (combinatorial purged CV)        │
 │   ResultEvaluator       (DSR, PBO, SPA, tearsheet)       │
+│   OutputManager         (structured reports + manifests) │
 └─────────────────────────────────────────────────────────┘
 ```
 
 Each layer is independent. Higher layers depend on lower layers only through
 well-defined data contracts (see Section 5). No layer may import from a higher layer.
+
+**Architectural property (v0.3):** because conditioning outputs (2a) and
+predictive outputs (2b) flow back into the catalogue as derived variables,
+they share the same caching, persistence, and lookup infrastructure as raw
+data. Signal code consumes a regime indicator or a nowcast the same way it
+consumes a price series. This is what makes the modeling layer extensible —
+adding a new conditioning model or predictive model doesn't require changes
+to downstream code.
+
+**Where work currently stands (2026-05-14):**
+- Layer 1: complete through Milestone 5.4 (CachedSource active)
+- Layer 1.5 (catalogue): partial — registry exists (5.3), stateful lookup pending (5.7)
+- Layer 2a (conditioning): not started — first piece is Rates Trend regime filter (5.11)
+- Layer 2b (predictive): not started — Phase 6/7
+- Layer 2c (signals): three signals operational (5.5)
+- Layer 2d (combination): specced, not built — Phase 6/7
+- Layer 3: built per Phase 3, not re-verified against new signals
+- Layer 4: built per Phase 4, not re-verified
+
+See DESIGN_DECISIONS.md DD-003 for the rationale behind the 2a/2b/2c/2d split.
 
 ---
 

@@ -1,11 +1,16 @@
 # ROADMAP.md
 # Build Phases and Completion Criteria
 
-**Version:** 0.2
+**Version:** 0.3
 **Last Updated:** 2026-05-14
 **Rule:** Do not begin a phase until all completion criteria for the previous phase are met.
 Completion means: tests pass, data contracts are verified, and the module has been
 reviewed in Claude.ai against ARCHITECTURE.md.
+
+**Companion documents:**
+- `ARCHITECTURE.md` — system design (source of truth for structure)
+- `DESIGN_DECISIONS.md` — rationale for major design choices (why, not what)
+- `PROGRESS.md` — current execution state and known issues
 
 ---
 
@@ -238,68 +243,151 @@ FRED flaps intermittently. This is fragile and slow.
 
 ---
 
-### Milestone 5.5 — G10 FX Expansion
-**Goal:** Full G10 cross-section for FX Carry signal (7 currencies, 42 pairs).
+### Milestone 5.5 — G10 FX Expansion ✅
+**Goal:** Full G10 cross-section for FX Carry signal.
 
-**Problem:** Current FX Carry has only 3 currencies (USD/EUR/GBP) = 4 active pairs.
-Too few for meaningful cross-sectional IC. ICIR cannot pass 0.3 threshold.
+**Completed 2026-05-14.**
 
-**New currencies to add:** AUD, NZD, CAD, JPY, CHF (+ existing USD, EUR, GBP = 7 total)
+7-currency USD-anchored cross-section (6 active pairs after USD-anchoring,
+replacing pre-5.5 4-pair bilateral scheme that double-counted positions).
+Pair labels mechanically `<non-USD>/USD` — see DESIGN_DECISIONS.md DD-005 for
+market-convention deferral.
 
-**FRED rate series to source:**
-```yaml
-AUD: IR3TIB01AUM156N   # Australia 3M interbank
-NZD: IR3TIB01NZM156N   # New Zealand 3M interbank
-CAD: IR3TIB01CAM156N   # Canada 3M interbank
-JPY: IR3TIB01JPM156N   # Japan 3M interbank
-CHF: IR3TIB01CHM156N   # Switzerland 3M interbank
-```
-
-**Yahoo FX tickers to add:**
-```
-AUDUSD=X, NZDUSD=X, CADUSD=X (or USDCAD=X inverted),
-USDJPY=X (inverted), USDCHF=X (inverted)
-```
-
-**Tasks:**
-- [ ] Add 5 new rate series to `configs/data/variables/macro.yaml`
-- [ ] Update `configs/signals/fx_carry.yaml` with full G10 rate_series mapping
-- [ ] Fetch and cache all new rate series (note: most are monthly FRED frequency)
-- [ ] Fetch and cache all new FX spot pairs from Yahoo
-- [ ] Re-evaluate FX Carry with 7 currencies at monthly frequency
-- [ ] Validate: signal should be long AUD/NZD, short JPY/CHF over 2010-2019
-
-**Completion criteria:**
-- [ ] FX Carry evaluated with 7 currencies, 12 active pairs (n_long=3, n_short=3)
-- [ ] ICIR at best monthly horizon documented in PROGRESS.md
-- [ ] Sanity check passes (AUD/NZD historically long, JPY/CHF historically short)
+**Results:** IC near zero across horizons, ICIR effectively zero. Signal-
+quality finding; not a methodology bug. Infrastructure milestone; methodology
+fixes in subsequent milestones.
 
 ---
 
-### Milestone 5.6 — Equity Universe Expansion
-**Goal:** 200-500 stock universe for Equity Momentum; re-evaluate at monthly frequency.
+### Milestone 5.6 — Output Container + Reporting Hygiene
+**Goal:** Structured output storage with reproducibility manifests; no more
+overwriting reports.
 
-**Problem:** 50-stock universe too small for robust cross-sectional IC.
-Survivorship bias persists (current S&P 500 members only — Phase 7 fix).
+**Problem:** Currently `reports/signal_evaluation_phase1.md` gets clobbered on
+every run. No way to compare past runs, reproduce specific results, or track
+how outputs change over time. This blocks the modeling work in Phase 5+.
 
 **Tasks:**
-- [ ] Expand `configs/universes/sp500_current.yaml` to 200 stocks (diversified sectors)
-- [ ] Cache all 200 tickers to `data/cache/` and `raw.duckdb`
-- [ ] Re-evaluate Equity Momentum at monthly frequency using frequency layer (Milestone 5.2)
-- [ ] Document survivorship bias caveat clearly in results
+- [ ] New module `src/reporting/output_manager.py` with `OutputManager` class
+- [ ] Folder structure: `reports/{variables,exploratory,strategies}/{timestamp}_{id}/`
+- [ ] Each output directory contains: results files + `manifest.json` (git
+      commit, config snapshot, data versions, runtime metadata)
+- [ ] Auto-generated `reports/index.csv` listing all runs with key metadata
+      (git-tracked for visibility)
+- [ ] Migrate existing `reports/signal_evaluation_phase1.md` to
+      `reports/variables/baseline/`
+- [ ] Update `scripts/evaluate_signals.py` to use `OutputManager`
+- [ ] Tests: `tests/test_output_manager.py` for manifest correctness, naming,
+      git capture
 
 **Completion criteria:**
-- [ ] Equity Momentum evaluated with 200 stocks at monthly frequency
-- [ ] ICIR at best monthly horizon documented in PROGRESS.md
-- [ ] Comparison table: 10-stock vs 50-stock vs 200-stock results
+- [ ] Two consecutive runs produce two distinct output directories
+- [ ] `manifest.json` contains git commit and is reproducible from manifest alone
+- [ ] `reports/index.csv` populated and committed
 
 ---
 
-### Milestone 5.7 — Rates Trend Regime Filter
-**Goal:** Make Rates Trend usable by conditioning on trending regime.
+### Milestone 5.7 — Variable Catalogue Wired Into Pipeline
+**Goal:** Make the `VariableCatalog` (5.3 registry) actually serve data, not
+just declare it. Cache-first lookup with transformation support.
 
-**Problem:** Rates Trend fails in post-trend consolidation (2023-2024 ICIR = -0.68).
-Works well in trending regimes (2022 Sharpe = 1.28). Needs a regime gate.
+**Problem:** The catalogue currently exists as a YAML registry with metadata,
+but signal code still reads tickers directly from signal configs. Data flow
+is duplicated across every signal. No central place to ask "give me variable X
+at frequency Y."
+
+**Tasks:**
+- [ ] Promote `VariableCatalog` from stateless registry to stateful runtime
+      object holding DataStore + sources (see DESIGN_DECISIONS.md DD-006)
+- [ ] Implement `catalogue.get(variable_name, frequency)` with cache-first
+      lookup: derived → raw → fetch
+- [ ] Refactor `scripts/evaluate_signals.py` to obtain data via catalogue
+- [ ] Refactor signal `required_data` declarations to use catalogue variable
+      names, not source-specific tickers
+- [ ] Audit frequency layer behavior per DD-004 (multi-frequency policy)
+- [ ] Tests: catalogue.get round-trips, cache-first behavior, frequency mismatch
+      handling
+
+**Completion criteria:**
+- [ ] Three existing signals (FX Carry, Rates Trend, Equity Momentum) use the
+      catalogue for all data access
+- [ ] No direct DataStore or source calls remain in signal code
+- [ ] `tests/test_variable_catalog.py` covers stateful operations
+
+---
+
+### Milestone 5.8 — Transformation Pipeline + Derived Variable Persistence
+**Goal:** Declared transformations actually execute, and their outputs live in
+`derived.duckdb` for reuse across runs and signals.
+
+**Problem:** `configs/data/variables/transformations.yaml` declares 7
+transformations (z-scores, log returns, vol, slopes) but no code computes them.
+Derived variables don't persist; they get recomputed each run.
+
+**Tasks:**
+- [ ] New module `src/data/transformations.py` with one function per
+      transformation type (z-score, log return, rolling vol, rate slope, etc.)
+- [ ] Transformation executor: given a transformation spec, look up inputs from
+      catalogue, apply, return derived series
+- [ ] Wire into catalogue: requesting a derived variable triggers transformation
+      execution if not cached
+- [ ] Persist derived outputs to `derived.duckdb` with proper invalidation
+      (re-compute if transformation spec changed)
+- [ ] Tests: each transformation has correctness tests; cache invalidation works
+
+**Completion criteria:**
+- [ ] All 7 declared transformations execute and persist
+- [ ] Second run of any signal that uses derived vars is fully offline
+- [ ] Changing a transformation spec triggers re-computation
+
+---
+
+### Milestone 5.9 — FX Carry Quarterly Horizon Experiment
+**Goal:** Quick read on whether the near-zero monthly IC is partly a horizon
+mismatch (see DESIGN_DECISIONS.md OQ-001).
+
+**Tasks:**
+- [ ] Re-run FX Carry evaluation at quarterly horizon using frequency layer
+- [ ] Document IC/ICIR at 1m, 2m, 3m, 6m, 12m horizons side-by-side
+- [ ] Output via `OutputManager` (5.6) to `reports/exploratory/`
+
+**Completion criteria:**
+- [ ] Results documented as a one-off exploratory output
+- [ ] Decision logged in PROGRESS.md: which horizon to use going forward
+
+---
+
+### Milestone 5.10 — Universe Expansion (FX EM, Equities, Rates)
+**Goal:** Expand cross-section meaningfully now that catalogue/transformation
+infrastructure is in place. See DESIGN_DECISIONS.md DD-002.
+
+**Targets:**
+- **FX**: G10 + 5 EM (MXN, BRL, ZAR, INR, TRY) = 12 USD-anchored pairs
+- **Equities**: ~55 stocks, 5 per GICS sector × 11 sectors (sector-balanced)
+- **Rates**: + TIP (TIPS), LQD (IG credit) — total ~6 ETFs
+
+**Tasks:**
+- [ ] Add 5 EM FX rate series + spot pairs (note: Yahoo data quality drops
+      outside G10 — document caveat)
+- [ ] Curate 55-stock equity universe sector-balanced; commit to
+      `configs/data/universes/sp500_sector_balanced.yaml`
+- [ ] Add TIP and LQD to rate ETF universe
+- [ ] Re-evaluate all three signals on expanded universes
+- [ ] Document results vs pre-expansion baseline
+
+**Completion criteria:**
+- [ ] All three signals re-evaluated, results in `reports/variables/`
+- [ ] Comparison tables: pre vs post universe expansion
+
+---
+
+### Milestone 5.11 — Rates Trend Regime Filter
+**Goal:** Make Rates Trend usable by conditioning on trending regime. First
+piece of conditioning layer (ARCHITECTURE.md Layer 2a).
+
+**Problem:** Rates Trend fails in post-trend consolidation (2023-2024 ICIR =
+-0.68). Works well in trending regimes (2022 Sharpe = 1.28). Needs a regime
+gate.
 
 **New derived variables needed:**
 ```yaml
@@ -314,7 +402,7 @@ REGIME_RATES_TREND:
   layer: derived
   type: regime_indicator
   inputs: [TLT_VOL_63D]
-  rule: "1 if TLT_VOL_63D > 0.008 else 0"  # 0.8% annualised daily vol threshold
+  rule: "1 if TLT_VOL_63D > 0.008 else 0"
   description: "1 = trending rates regime, 0 = choppy"
 ```
 
@@ -322,29 +410,97 @@ REGIME_RATES_TREND:
 - [ ] Add `TLT_VOL_63D` to `configs/data/variables/transformations.yaml`
 - [ ] Add `REGIME_RATES_TREND` to `configs/data/derived_variables.yaml`
 - [ ] Add `regime_filter` parameter to `RatesTrendSignal.compute()`
-  - When regime=0, signal output = 0 (no position)
-  - When regime=1, signal computed normally
 - [ ] Evaluate Rates Trend with regime filter across full period and sub-periods
 - [ ] Add test: signal = 0 when regime indicator = 0
 
 **Completion criteria:**
 - [ ] Rates Trend with regime filter evaluated pre/post 2022
 - [ ] Full-period ICIR improves vs unfiltered version
-- [ ] Results documented in PROGRESS.md
+- [ ] Conditioning-layer pattern documented for future regime models
+
+---
+
+### Milestone 5.12 — IBSource (FX Focus)
+**Goal:** Wire Interactive Brokers as a third data source, scoped narrowly to
+FX (real-time and historical). See DESIGN_DECISIONS.md DD-001.
+
+**Prerequisites:** IB paper account exists, Gateway installed and tested,
+API port 7497, IDEALPRO FX subscription active. ✅ All confirmed 2026-05-14.
+
+**Tasks:**
+- [ ] Implement `src/data/sources/ib.py` using `ib_insync`
+- [ ] Async fetch wrapped in sync interface to match `DataSource` contract
+- [ ] Connection management: auto-reconnect on drop, retry on timeout
+- [ ] Request pacing: respect ~50 req/sec API limit
+- [ ] Scope explicitly: FX spot and FX forward points only in this milestone
+- [ ] Add to catalogue as preferred source for FX where available
+- [ ] Tests with mock IB connection (don't require Gateway running for CI)
+- [ ] Integration test with real paper account (manual, documented separately)
+
+**Completion criteria:**
+- [ ] FX data fetched from IB matches Yahoo within reasonable tolerance
+- [ ] Catalogue can fall back from IB to Yahoo if Gateway is unavailable
+- [ ] Documentation: how to start Gateway, how to run the integration test
+
+---
+
+### Milestone 5.13 — Forward-Spot Basis Carry Signal
+**Goal:** True CIP-implied carry signal using actual FX forward points from IB.
+See DESIGN_DECISIONS.md OQ-001 item 1.
+
+**Problem:** Current FX Carry approximates carry via interest rate differentials.
+Real carry is `(forward_rate - spot_rate) / spot_rate`. Post-2008 CIP deviations
+mean these differ meaningfully and the deviation has been a documented return
+source (Du, Tepper, Verdelhan 2018).
+
+**Tasks:**
+- [ ] New signal `src/signals/fx/basis_carry.py`
+- [ ] Fetch 1M and 3M forward points for all 12 FX pairs via IB
+- [ ] Compute basis carry per pair, rank cross-sectionally
+- [ ] Side-by-side evaluation with rate-differential carry
+- [ ] Document the CIP deviation as its own data series
+
+**Completion criteria:**
+- [ ] Basis carry signal evaluated; IC/ICIR compared to rate-differential carry
+- [ ] CIP deviation series available for future analysis
+
+---
+
+### Milestone 5.14 — Vol Conditioning Experiment on FX Carry
+**Goal:** Test the conditioning layer infrastructure on FX Carry. Documented
+effect: carry works in low-vol regimes, fails in high-vol crises.
+
+**Tasks:**
+- [ ] Vol regime indicator from VIX (high/normal/low thresholds)
+- [ ] Apply as position-size multiplier on FX Carry signal
+- [ ] Evaluate conditional vs unconditional carry
+- [ ] Document: does conditioning help, hurt, or wash out?
+
+**Note:** Our backtest period (2010-2024) doesn't include 2008 carry unwind.
+Expected effect may be muted vs literature.
+
+**Completion criteria:**
+- [ ] Conditional FX Carry evaluated
+- [ ] Results documented vs unconditional baseline
+- [ ] Decision logged: keep, drop, or revisit with longer backtest
 
 ---
 
 ### Phase 5 Completion Criteria
-- [ ] All 72 existing tests still pass
-- [ ] Frequency layer working — no manual resampling required in evaluation scripts
-- [ ] Variable catalog complete — all Phase 1 variables defined with lineage
-- [ ] DataStore populated — `store.list_available()` shows all series
-- [ ] FX Carry re-evaluated with 7 currencies — ICIR documented
-- [ ] Equity Momentum re-evaluated with 200 stocks — ICIR documented
-- [ ] Rates Trend regime filter implemented and evaluated
-- [ ] At least one signal passes ICIR > 0.3 after Phase 5 improvements
+- [ ] All existing tests still pass (current: 119)
+- [ ] Frequency layer working — no manual resampling required in evaluation scripts ✅ (5.2)
+- [ ] Variable catalogue stateful and serving data via cache-first lookup (5.7)
+- [ ] Transformation pipeline executes declared transformations and persists derived
+      variables (5.8)
+- [ ] Output container in place with reproducibility manifests (5.6)
+- [ ] FX Carry re-evaluated on full G10 ✅ (5.5)
+- [ ] Universe expansion complete (5.10)
+- [ ] Rates Trend regime filter implemented and evaluated (5.11)
+- [ ] IBSource integrated for FX (5.12)
+- [ ] At least one methodology investigation completed (5.9 + 5.13 or 5.14)
 - [ ] PROGRESS.md updated with all new results
-- [ ] `ARCHITECTURE.md` updated to reflect variable library architecture
+- [ ] `ARCHITECTURE.md` reflects modeling layer split (2a/2b/2c)
+- [ ] `DESIGN_DECISIONS.md` current
 
 ---
 
@@ -354,13 +510,15 @@ REGIME_RATES_TREND:
 **Depends on:** Phase 5 complete, at least one signal ICIR > 0.3
 
 **Prerequisites:**
-- IB account confirmed ✅ (account exists)
-- IB TWS or IB Gateway installed on local machine
-- Paper trading account funded (simulated)
+- IB paper account ✅ (account `phbojg566` / `DUP730772`, 2026-05-14)
+- IB Gateway installed and API tested ✅ (port 7497, 2026-05-14)
+- IDEALPRO FX subscription active ✅ (2026-05-14)
+- IBSource module built in Milestone 5.12 (FX historical/real-time)
+- Market-convention FX label translation layer (per DESIGN_DECISIONS.md DD-005)
 
-### Milestone 6.1 — IBSource Live Feed
-- [ ] Connect to IB TWS paper account via `ib_insync`
-- [ ] `IBSource.fetch_live()` returns real-time prices matching DataStore schema
+### Milestone 6.1 — IBSource Live Feed Extension
+**Builds on:** Milestone 5.12 `IBSource` (which covers FX historical).
+- [ ] Extend `IBSource` to subscribe to real-time bar updates
 - [ ] Signal computed on live data verified to match backtest signal on same date
 - [ ] Handle market hours, holidays, and connection drops gracefully
 
@@ -376,7 +534,7 @@ REGIME_RATES_TREND:
 - [ ] Rolling 60-day IC per signal computed and plotted
 - [ ] Drawdown monitor vs backtest max drawdown
 - [ ] Signal drift alert: IC < -0.05 for 3 consecutive months → email/log alert
-- [ ] Simple daily report saved to `reports/live/YYYY-MM-DD.md`
+- [ ] Use `OutputManager` from 5.6 for daily report storage
 
 ### Kill Switch Criteria (hard-coded, not configurable)
 Strategy halted automatically if any of:
