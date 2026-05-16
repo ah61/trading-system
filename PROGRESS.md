@@ -4,6 +4,12 @@
 **Last Updated:** 2026-05-16
 **Tracks ROADMAP.md version:** 0.6
 
+**2026-05-16 update:** Two performance commits landed (`b870324`,
+`3f0d76b`). Backtest wall time on the canonical Rates Trend / TLT /
+2010-2024 run: 235s → 3.5s (~67×). Numerics preserved exactly
+(Sharpe -0.5499, max DD -3.31%). Tests: 166 → 167. See
+"Performance work (2026-05-16)" subsection below.
+
 ---
 
 ## Current Status
@@ -11,9 +17,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.7 ✅ closed (2026-05-16). `_resample` fix shipped. `scripts/backtest_strategy.py` shipped (Phase 6 prerequisite met). |
-| **Tests** | 166 passing |
-| **Next action** | Open question: vectorise/cache the engine signal recompute (current backtest takes ~4.5 min per run; not blocking, but compounds when adding walk-forward modes and multiple signals). Or proceed to Milestone 5.8 (Transformation Pipeline) per ROADMAP order. |
+| **Active milestone** | 5.7 ✅ closed (2026-05-16). Engine perf work also closed (2026-05-16) — see "Performance work" subsection. |
+| **Tests** | 167 passing |
+| **Next action** | Milestone 5.8 (Transformation Pipeline + Derived Variable Persistence) per ROADMAP order. Smaller side items: wire `fx_carry`/`equity_momentum` into `PORTFOLIO_BY_SIGNAL` in `scripts/backtest_strategy.py` when needed; rolling-Sharpe tearsheet warn-or-skip when test history < 2× window. |
 
 ---
 
@@ -554,6 +560,88 @@ Shipped commit `3095fc0`.
 
 ---
 
+### Performance work (2026-05-16) ✅
+
+Both commits in this session preserved numerics exactly: Sharpe -0.5499,
+max drawdown -3.31% on the canonical Rates Trend / TLT / 2010-2024 run
+(reference: `phase4-validated` tag, last verified pre-5.7).
+
+**Backtest wall time, same run, same data:**
+
+| Stage | Wall time | Notes |
+|---|---|---|
+| Pre-5.7 baseline | ~270s | Original Phase 4 engine. |
+| Post-5.7 (commit fc2017a) | ~265s | Series-throughout refactor; perf unchanged. |
+| After `b870324` (engine compute-once) | ~235s | Modest gain — `compute()` was cheap. |
+| After `3f0d76b` (vectorise `_enforce_net_limit`) | **3.5s** | ~67× total. |
+
+**Commit `b870324` — `perf(backtest): compute signals once per fold instead of per date`:**
+
+- `BacktestEngine.run` previously called `signal.compute(sliced_data)` for
+  every calendar day in `history` (3,773 calls for Rates Trend 2010-2024).
+  Replaced with one compute call per signal on data causally truncated to
+  `history[-1]`, then per-date as-of sampling via the existing
+  `_signal_value_to_instrument_row`.
+- Correctness rests on a property all current signals satisfy:
+  `compute(data[:T])` at any `t<=T` equals `compute(data[:t]).iloc[-1]`
+  (signals are causal by construction; the no-lookahead test contract
+  pins this). The added inline comment in `engine.py` makes this contract
+  explicit.
+- Walk-forward and CPCV call `engine.run` with already-truncated data
+  per fold (verified — `_restrict_data_to_timestamps` in `cpcv.py`,
+  fold-bound `data` in `walk_forward.py`), so the single-compute is
+  bounded by the fold's `end_date`. No cross-fold contamination.
+- `tests/test_backtest.py`: deleted `_SpyNoLookaheadSignal` and
+  `test_no_lookahead_enforced` (they pinned the engine-loop invariant,
+  which no longer holds). Replaced with
+  `test_signal_compute_is_causal_under_future_perturbation` — pins the
+  causality property directly via input perturbation, which is the
+  invariant that actually matters.
+- Engine refactor on its own took ~30s off wall time; the bigger win
+  was unlocked by the profile this enabled.
+
+**Commit `3f0d76b` — `perf(portfolio): vectorise _enforce_net_limit (O(N^2) → O(N))`:**
+
+- Profile after `b870324` showed `PortfolioConstructor._enforce_net_limit`
+  consuming 99% of remaining wall time. `_enforce_net_limit_row` was
+  called 919,170 times across 252 `construct()` calls (3,648 row calls
+  per construct). Root cause: the engine calls `constructor.construct`
+  per test date with cumulatively-growing weight DataFrames, and the
+  prior implementation re-enforced every row of every prefix using a
+  Python loop over columns. Total cost O(N²) in fold length.
+- Replaced the per-row Python loop with a vectorised numpy implementation:
+  per-row net/excess/direction computed in one pass, candidates sorted
+  descending by absolute value with stable argsort, cumulative-sum
+  walked to find the partial-reduction column, deltas unsorted via
+  inverse permutation. Operates on the full DataFrame in one pass.
+- Semantics pinned exactly: greedy water-filling from largest |w| first;
+  ties broken by original column order; same-sign-as-net candidates
+  only; no zero-crossing; `net_limit == inf` fast path preserved.
+- `_enforce_net_limit_row` retained as reference implementation with a
+  docstring note. Useful both as executable documentation of the
+  per-row semantics and as the regression-test reference.
+- New test `test_enforce_net_limit_matches_row_reference` pins
+  vectorised output against the per-row loop on 7 scenario rows
+  covering: net within limit, net at limit, single-column reduction,
+  multi-column with partial last column, excess exceeding all
+  candidates, all-zero row, negative-net direction. `atol=1e-12`.
+- Real-data backtest after this commit: **3.5s**, numerics byte-identical
+  to pre-refactor.
+
+**Caveat — these numbers are for a single-instrument single-signal run.**
+Multi-instrument runs will scale `_enforce_net_limit` linearly with
+column count (intra-row sorts and cumsums are O(K log K) per row). The
+O(N²) → O(N) reduction is in the row dimension; the column dimension
+is unchanged. Still a huge win because N (calendar dates) is the
+dominant axis in any realistic backtest.
+
+**What this unlocks:** Walk-forward parameter sweeps and multi-signal
+portfolios are now tractable. A pre-5.16 ballpark: a 6-fold walk-forward
+with 4 signals previously projected at ~108 minutes is now under 90
+seconds.
+
+---
+
 ### IB account setup ✅ (2026-05-14)
 
 Prerequisites for Milestone 5.12 completed:
@@ -585,15 +673,15 @@ Phase 7.2 Treasury futures work.
 
 ### Engine
 
-- **Signal recompute is O(calendar) per backtest run (surfaced 2026-05-16
-  via `backtest_strategy.py` real-data run).** `BacktestEngine.run` loops
-  `signal.compute(sliced_data)` for every calendar day in OOS history.
-  For Rates Trend on TLT 2010-2024 with default windows (5y train,
-  1y test) this is ~252 compute calls and ~4.5 min wall time. Compounds
-  with walk-forward modes and multiple signals. Fix scope: vectorise
-  inside the engine, or restrict recompute to `test_dates` only. Not
-  blocking the current Phase 5 work, but should be addressed before
-  parameter sweeps or multi-signal portfolios.
+- **~~Signal recompute is O(calendar) per backtest run~~ Resolved 2026-05-16
+  (commits `b870324` engine + `3f0d76b` portfolio).** The 4.5-min wall time
+  surfaced via `backtest_strategy.py` was traced to two compounding issues:
+  (1) `BacktestEngine.run` recomputing each signal once per calendar day
+  rather than once per fold, and (2) `PortfolioConstructor._enforce_net_limit`
+  re-enforcing every row of every prefix on each `construct()` call,
+  yielding O(N²) row visits. Both fixed; canonical run now 3.5s with
+  byte-identical numerics. See "Performance work (2026-05-16)" subsection
+  above.
 
 ### Reporting
 
