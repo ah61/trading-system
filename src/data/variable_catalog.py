@@ -537,9 +537,16 @@ class VariableCatalog:
         fetch_start = start or date(2010, 1, 1)
         fetch_end = end or date.today()
 
+        load_start = fetch_start
+        if frequency is not None and frequency != native_freq:
+            if self._freq_rank(frequency) < self._freq_rank(native_freq):
+                # Coarser → finer forward-fill needs a print at or before the
+                # requested start (e.g. prior month-end for monthly → daily).
+                load_start = self._fetch_start_for_ffill(fetch_start, native_freq)
+
         df = cached.fetch_or_load(
             ticker_or_id,
-            fetch_start,
+            load_start,
             fetch_end,
             frequency=native_freq,
             force_refresh=force_refresh,
@@ -548,7 +555,13 @@ class VariableCatalog:
 
         # Resample if a target frequency was requested and differs from native.
         if frequency is not None and frequency != native_freq:
-            series = self._resample(series, source_freq=native_freq, target_freq=frequency)
+            series = self._resample(
+                series,
+                source_freq=native_freq,
+                target_freq=frequency,
+                start=fetch_start,
+                end=fetch_end,
+            )
 
         return series
 
@@ -599,7 +612,30 @@ class VariableCatalog:
         )
 
     @staticmethod
-    def _resample(series: pd.Series, *, source_freq: str, target_freq: str) -> pd.Series:
+    def _freq_rank(freq: str) -> int:
+        return {"daily": 0, "weekly": 1, "monthly": 2, "quarterly": 3}.get(freq, 0)
+
+    @staticmethod
+    def _fetch_start_for_ffill(start: date, source_freq: str) -> date:
+        """Return a fetch start far enough back to include one prior source print."""
+        ts = pd.Timestamp(start, tz="UTC")
+        if source_freq == "monthly":
+            return (ts - pd.offsets.MonthBegin(1)).date()
+        if source_freq == "weekly":
+            return (ts - pd.offsets.Week(weekday=4)).date()
+        if source_freq == "quarterly":
+            return (ts - pd.offsets.QuarterBegin(startingMonth=1)).date()
+        return (ts - pd.offsets.BDay(1)).date()
+
+    @staticmethod
+    def _resample(
+        series: pd.Series,
+        *,
+        source_freq: str,
+        target_freq: str,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> pd.Series:
         """Resample a series from source frequency to target frequency.
 
         Policy (DD-004):
@@ -611,29 +647,64 @@ class VariableCatalog:
         - Coarser → finer (e.g. monthly → daily): forward-fill. Information
           content remains coarse, but the index aligns with daily signals.
         - Never interpolate.
+
+        When ``start`` / ``end`` are provided, the returned index is anchored to
+        that calendar range (not to the first/last native print). Raises
+        ``CatalogError`` if the requested start predates the first source print.
         """
-        freq_rank = {"daily": 0, "weekly": 1, "monthly": 2, "quarterly": 3}
-        src_rank = freq_rank.get(source_freq, 0)
-        tgt_rank = freq_rank.get(target_freq, 0)
+        var_name = series.name or "series"
+        tz = series.index.tz
+
+        def _raise_predates(first_obs: pd.Timestamp, requested: date) -> None:
+            raise CatalogError(
+                f"Source for {var_name!r} ({source_freq}) starts at {first_obs.date()}; "
+                f"requested start {requested} is earlier — source does not cover "
+                f"requested range."
+            )
+
+        src_rank = VariableCatalog._freq_rank(source_freq)
+        tgt_rank = VariableCatalog._freq_rank(target_freq)
 
         if src_rank == tgt_rank:
             return series
+
+        if series.empty:
+            raise CatalogError(f"Source for {var_name!r} ({source_freq}) has no data.")
 
         pandas_freq = {
             "daily": "B", "weekly": "W-FRI", "monthly": "ME", "quarterly": "QE",
         }[target_freq]
 
         if src_rank < tgt_rank:
-            # Source is finer than target → aggregate down. last() is the
-            # right default for level series (prices, rates, indices). If the
-            # caller needs sum-of-returns, they should pass a returns series
-            # and use SignalEvaluator's own resampling pipeline.
-            return series.resample(pandas_freq).last()
-        # Source is coarser than target → forward-fill onto the finer index.
-        # The forward-fill produces a series that "looks daily" but has stale
-        # values between source-frequency prints. DD-004 documents this.
-        target_index = pd.date_range(
-            start=series.index.min(), end=series.index.max(),
-            freq=pandas_freq, tz=series.index.tz,
-        )
+            if start is not None:
+                req_start = pd.Timestamp(start, tz=tz)
+                if req_start < series.index.min():
+                    _raise_predates(series.index.min(), start)
+            resampled = series.resample(pandas_freq).last().dropna()
+            if resampled.empty:
+                raise CatalogError(f"Source for {var_name!r} ({source_freq}) has no data.")
+            if end is not None:
+                end_ts = pd.Timestamp(end, tz=tz)
+                period_index = pd.date_range(
+                    start=resampled.index.min(),
+                    end=end_ts,
+                    freq=pandas_freq,
+                    tz=tz,
+                )
+                resampled = resampled.reindex(period_index)
+            return resampled
+
+        idx_start = pd.Timestamp(start, tz=tz) if start is not None else series.index.min()
+        idx_end = pd.Timestamp(end, tz=tz) if end is not None else series.index.max()
+        if start is not None:
+            req_start = pd.Timestamp(start, tz=tz)
+            if req_start < series.index.min():
+                _raise_predates(series.index.min(), start)
+
+        if target_freq == "daily":
+            target_index = pd.bdate_range(start=idx_start, end=idx_end, tz=tz)
+        else:
+            target_index = pd.date_range(
+                start=idx_start, end=idx_end, freq=pandas_freq, tz=tz,
+            )
         return series.reindex(target_index, method="ffill")

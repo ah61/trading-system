@@ -414,10 +414,15 @@ class _StubSource(DataSource):
         name: str,
         frequency: str,
         value_fn: Callable[[pd.Timestamp], float] | None = None,
+        *,
+        month_end_min: date | None = None,
+        month_end_max: date | None = None,
     ) -> None:
         self.name = name
         self.frequency = frequency
         self._value_fn = value_fn or self._default_value_fn
+        self._month_end_min = month_end_min
+        self._month_end_max = month_end_max
         self.call_count = 0
         self.last_fetch: tuple[str, date, date] | None = None
 
@@ -432,6 +437,12 @@ class _StubSource(DataSource):
             index = pd.bdate_range(start, end, tz="UTC")
         elif self.frequency == "monthly":
             index = pd.date_range(start, end, freq="ME", tz="UTC")
+            if self._month_end_min is not None:
+                floor = pd.Timestamp(self._month_end_min, tz="UTC")
+                index = index[index >= floor]
+            if self._month_end_max is not None:
+                ceiling = pd.Timestamp(self._month_end_max, tz="UTC")
+                index = index[index <= ceiling]
         else:
             raise ValueError(f"Unsupported stub frequency: {self.frequency!r}")
         values = np.array([self._value_fn(ts) for ts in index], dtype=np.float64)
@@ -502,14 +513,59 @@ def test_get_forward_fills_monthly_to_daily(tmp_path: Path, tmp_store: DataStore
     cat = _build_cat(tmp_path, _GS10_MONTHLY, sources={"fred": stub}, store=tmp_store)
     start, end = date(2020, 1, 1), date(2020, 12, 31)
     series = cat.get("GS10", frequency="daily", start=start, end=end)
-    assert isinstance(series.index, pd.DatetimeIndex)
-    assert str(series.index.tz) in ("UTC", "UTC+00:00")
-    assert pd.infer_freq(series.index) == "B"
+    expected_index = pd.bdate_range(start, end, tz="UTC")
+    assert series.index.equals(expected_index)
     assert not series.isna().any()
-    # Step-flat within a month (no interpolation): two consecutive business days.
     feb_days = series.loc["2020-02-03":"2020-02-29"]
     assert len(feb_days) >= 2
     assert feb_days.iloc[0] == feb_days.iloc[1]
+
+
+def test_get_forward_fill_anchors_on_requested_range(
+    tmp_path: Path, tmp_store: DataStore,
+) -> None:
+    stub = _StubSource(name="fred", frequency="monthly")
+    cat = _build_cat(tmp_path, _GS10_MONTHLY, sources={"fred": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 12, 31)
+    series = cat.get("GS10", frequency="daily", start=start, end=end)
+    expected_index = pd.bdate_range(start, end, tz="UTC")
+    assert series.index.equals(expected_index)
+    assert not series.isna().any()
+
+
+def test_get_forward_fill_raises_when_request_predates_source(
+    tmp_path: Path, tmp_store: DataStore,
+) -> None:
+    stub = _StubSource(
+        name="fred", frequency="monthly", month_end_min=date(2020, 3, 31),
+    )
+    cat = _build_cat(tmp_path, _GS10_MONTHLY, sources={"fred": stub}, store=tmp_store)
+    with pytest.raises(CatalogError, match="does not cover"):
+        cat.get(
+            "GS10",
+            frequency="daily",
+            start=date(2020, 1, 1),
+            end=date(2020, 12, 31),
+        )
+
+
+def test_get_forward_fill_extends_past_last_print(
+    tmp_path: Path, tmp_store: DataStore,
+) -> None:
+    stub = _StubSource(
+        name="fred",
+        frequency="monthly",
+        month_end_max=date(2020, 9, 30),
+    )
+    cat = _build_cat(tmp_path, _GS10_MONTHLY, sources={"fred": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 12, 31)
+    series = cat.get("GS10", frequency="daily", start=start, end=end)
+    expected_index = pd.bdate_range(start, end, tz="UTC")
+    assert series.index.equals(expected_index)
+    sep_value = series.loc["2020-09-30"]
+    oct_onward = series.loc["2020-10-01":]
+    assert len(oct_onward) > 0
+    assert (oct_onward == sep_value).all()
 
 
 def test_get_raises_in_registry_only_mode(tmp_path: Path) -> None:
