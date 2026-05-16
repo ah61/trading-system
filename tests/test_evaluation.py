@@ -21,6 +21,37 @@ def _panel_series(dates: pd.DatetimeIndex, assets: list[str], values: np.ndarray
     return pd.Series(values.reshape(len(dates) * len(assets)), index=idx, dtype=float)
 
 
+def _prices_from_log_returns(
+    log_returns: pd.Series,
+    *,
+    start: float = 100.0,
+) -> pd.Series:
+    """Construct a price series whose 1-period log returns equal `log_returns`.
+
+    Single-asset (DatetimeIndex): start * exp(cumsum(log_returns)).
+    Cross-sectional (MultiIndex date, asset): cumsum applied per asset.
+
+    The first-period log return is preserved by prepending a unit (start)
+    observation conceptually — i.e. the evaluator's internal log(p/p.shift(1))
+    on the result yields the input log_returns from period 2 onward, with NaN
+    at period 1 (which the evaluator handles via dropna).
+
+    Used to migrate tests from passing log returns to passing prices after
+    the DD-009 refactor. The evaluator's internal _compute_log_returns_from_prices
+    reproduces the input log returns under the same NaN-at-head policy.
+    """
+    lr = log_returns.astype(float).sort_index()
+
+    if isinstance(lr.index, pd.MultiIndex):
+        asset_level = lr.index.names[1] if lr.index.names[1] is not None else 1
+        lr_filled = lr.fillna(0.0)
+        cum = lr_filled.groupby(level=asset_level, sort=False).cumsum()
+        return (start * np.exp(cum)).astype(float)
+
+    lr_filled = lr.fillna(0.0)
+    return (start * np.exp(lr_filled.cumsum())).astype(float)
+
+
 def test_ic_mean_positive_for_perfect_signal() -> None:
     rng = np.random.default_rng(0)
     dates = pd.date_range("2024-01-01", periods=120, freq="B", tz="UTC")
@@ -39,8 +70,9 @@ def test_ic_mean_positive_for_perfect_signal() -> None:
     fwd = _panel_series(dates, assets, fwd_vals)
     log_returns = fwd
 
+    prices = _prices_from_log_returns(log_returns)
     ev = SignalEvaluator()
-    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
+    m = ev.evaluate(signal=signal, prices=prices, horizon=horizon)
     assert m.ic_mean > 0.9
 
 
@@ -55,8 +87,9 @@ def test_ic_mean_near_zero_for_random_signal() -> None:
     # Evaluator applies shift(-(horizon+1)) internally; pass 1-period returns.
     log_returns = fwd
 
+    prices = _prices_from_log_returns(log_returns)
     ev = SignalEvaluator()
-    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
+    m = ev.evaluate(signal=signal, prices=prices, horizon=horizon)
     assert abs(m.ic_mean) < 0.3
 
 
@@ -73,8 +106,9 @@ def test_icir_computed_correctly() -> None:
     # Evaluator applies shift(-(horizon+1)) internally; pass 1-period returns.
     log_returns = fwd
 
+    prices = _prices_from_log_returns(log_returns)
     ev = SignalEvaluator()
-    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
+    m = ev.evaluate(signal=signal, prices=prices, horizon=horizon)
     if np.isfinite(m.ic_std) and m.ic_std != 0:
         assert m.icir == m.ic_mean / m.ic_std
 
@@ -90,8 +124,9 @@ def test_hit_rate_one_for_perfect_signal() -> None:
     fwd = _panel_series(dates, assets, fwd_vals)
     log_returns = fwd
 
+    prices = _prices_from_log_returns(log_returns)
     ev = SignalEvaluator()
-    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
+    m = ev.evaluate(signal=signal, prices=prices, horizon=horizon)
     assert m.hit_rate == 1.0
 
 
@@ -109,8 +144,9 @@ def test_signal_sharpe_positive_for_good_signal() -> None:
     fwd = _panel_series(dates, assets, fwd_vals)
     log_returns = fwd
 
+    prices = _prices_from_log_returns(log_returns)
     ev = SignalEvaluator()
-    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
+    m = ev.evaluate(signal=signal, prices=prices, horizon=horizon)
     assert m.signal_sharpe > 0.0
 
 
@@ -126,8 +162,9 @@ def test_n_observations_correct() -> None:
     # Evaluator applies shift(-(horizon+1)) internally; pass 1-period returns.
     log_returns = fwd
 
+    prices = _prices_from_log_returns(log_returns)
     ev = SignalEvaluator()
-    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=horizon)
+    m = ev.evaluate(signal=signal, prices=prices, horizon=horizon)
 
     # Evaluator applies shift(-(h+1)) per asset, so last (h+1) rows per asset drop.
     expected = (len(dates) - (horizon + 1)) * len(assets)
@@ -143,9 +180,10 @@ def test_evaluator_handles_single_asset_signal() -> None:
 
     signal = pd.Series(signal_vals, index=dates, dtype=float, name="signal")
     log_returns = pd.Series(fwd_vals, index=dates, dtype=float, name="ret")
+    prices = _prices_from_log_returns(log_returns)
 
     ev = SignalEvaluator()
-    m = ev.evaluate(signal=signal, forward_returns=log_returns, horizon=1)
+    m = ev.evaluate(signal=signal, prices=prices, horizon=1)
 
     assert m.forward_return_horizon == 1
     # After applying shift(-(horizon + 1)) the last 2 obs become NaN and are dropped.
@@ -285,7 +323,8 @@ def _build_daily_log_returns(n_days: int = 500, seed: int = 0) -> pd.Series:
 def test_signal_evaluator_evaluate_accepts_frequency_daily() -> None:
     sig = _build_daily_log_returns(n_days=300, seed=1).clip(-1, 1)
     ret = _build_daily_log_returns(n_days=300, seed=2)
-    m = SignalEvaluator().evaluate(sig, ret, horizon=1, frequency="daily")
+    prices = _prices_from_log_returns(ret)
+    m = SignalEvaluator().evaluate(sig, prices, horizon=1, frequency="daily")
     assert isinstance(m, SignalMetrics)
     assert m.frequency == "daily"
     assert m.forward_return_horizon == 1
@@ -294,14 +333,16 @@ def test_signal_evaluator_evaluate_accepts_frequency_daily() -> None:
 def test_signal_evaluator_evaluate_accepts_frequency_weekly() -> None:
     sig = _build_daily_log_returns(n_days=300, seed=1).clip(-1, 1)
     ret = _build_daily_log_returns(n_days=300, seed=2)
-    m = SignalEvaluator().evaluate(sig, ret, horizon=1, frequency="weekly")
+    prices = _prices_from_log_returns(ret)
+    m = SignalEvaluator().evaluate(sig, prices, horizon=1, frequency="weekly")
     assert m.frequency == "weekly"
 
 
 def test_signal_evaluator_evaluate_accepts_frequency_monthly() -> None:
     sig = _build_monthly_signal_daily_indexed(n_days=500)
     ret = _build_daily_log_returns(n_days=500, seed=42)
-    m = SignalEvaluator().evaluate(sig, ret, horizon=3, frequency="monthly")
+    prices = _prices_from_log_returns(ret)
+    m = SignalEvaluator().evaluate(sig, prices, horizon=3, frequency="monthly")
     assert m.frequency == "monthly"
     assert m.forward_return_horizon == 3
 
@@ -309,15 +350,17 @@ def test_signal_evaluator_evaluate_accepts_frequency_monthly() -> None:
 def test_signal_evaluator_evaluate_rejects_unknown_frequency() -> None:
     sig = _build_daily_log_returns(n_days=50, seed=1).clip(-1, 1)
     ret = _build_daily_log_returns(n_days=50, seed=2)
+    prices = _prices_from_log_returns(ret)
     with pytest.raises(ValueError, match="Unknown frequency"):
-        SignalEvaluator().evaluate(sig, ret, horizon=1, frequency="hourly")  # type: ignore[arg-type]
+        SignalEvaluator().evaluate(sig, prices, horizon=1, frequency="hourly")  # type: ignore[arg-type]
 
 
 def test_signal_evaluator_evaluate_rejects_nonpositive_horizon() -> None:
     sig = _build_daily_log_returns(n_days=50, seed=1).clip(-1, 1)
     ret = _build_daily_log_returns(n_days=50, seed=2)
+    prices = _prices_from_log_returns(ret)
     with pytest.raises(ValueError, match="horizon must be a positive integer"):
-        SignalEvaluator().evaluate(sig, ret, horizon=0, frequency="daily")
+        SignalEvaluator().evaluate(sig, prices, horizon=0, frequency="daily")
 
 
 def test_signal_evaluator_monthly_evaluation_no_constant_input_warning() -> None:
@@ -326,10 +369,11 @@ def test_signal_evaluator_monthly_evaluation_no_constant_input_warning() -> None
     """
     sig = _build_monthly_signal_daily_indexed(n_days=500)
     ret = _build_daily_log_returns(n_days=500, seed=7)
+    prices = _prices_from_log_returns(ret)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", ConstantInputWarning)
-        m = SignalEvaluator().evaluate(sig, ret, horizon=2, frequency="monthly")
+        m = SignalEvaluator().evaluate(sig, prices, horizon=2, frequency="monthly")
 
     assert m.frequency == "monthly"
     # Roughly 500 business days / 21 ≈ 24 months; after shifting by horizon+1
@@ -409,11 +453,12 @@ def test_signal_sharpe_uses_correct_annualisation_per_frequency() -> None:
     rng = np.random.default_rng(123)
     daily_ret = pd.Series(rng.normal(loc=0.0005, scale=0.01, size=n), index=idx)
     sig = pd.Series(1.0, index=idx)
+    prices = _prices_from_log_returns(daily_ret)
 
     ev = SignalEvaluator()
-    m_daily = ev.evaluate(sig, daily_ret, horizon=1, frequency="daily")
-    m_weekly = ev.evaluate(sig, daily_ret, horizon=1, frequency="weekly")
-    m_monthly = ev.evaluate(sig, daily_ret, horizon=1, frequency="monthly")
+    m_daily = ev.evaluate(sig, prices, horizon=1, frequency="daily")
+    m_weekly = ev.evaluate(sig, prices, horizon=1, frequency="weekly")
+    m_monthly = ev.evaluate(sig, prices, horizon=1, frequency="monthly")
 
     # Sharpes won't be identical (data is resampled) but the annualisation
     # factor is observable: with signal=1 the per-period Sharpe is
@@ -461,8 +506,9 @@ def test_forward_return_shift_is_in_periods_at_frequency() -> None:
 
     # Clip into [-1, 1] per convention.
     sig_daily = sig_daily.clip(-1, 1)
+    prices = _prices_from_log_returns(daily_ret)
 
-    m = SignalEvaluator().evaluate(sig_daily, daily_ret, horizon=1, frequency="monthly")
+    m = SignalEvaluator().evaluate(sig_daily, prices, horizon=1, frequency="monthly")
     # IC should be strongly positive given perfect month-ahead alignment.
     assert np.isfinite(m.ic_mean)
     assert m.ic_mean > 0.5
@@ -472,10 +518,11 @@ def test_default_frequency_is_daily() -> None:
     """Calling evaluate() without specifying frequency must behave as before."""
     sig = _build_daily_log_returns(n_days=200, seed=1).clip(-1, 1)
     ret = _build_daily_log_returns(n_days=200, seed=2)
+    prices = _prices_from_log_returns(ret)
 
     ev = SignalEvaluator()
-    m_default = ev.evaluate(sig, ret, horizon=1)
-    m_daily = ev.evaluate(sig, ret, horizon=1, frequency="daily")
+    m_default = ev.evaluate(sig, prices, horizon=1)
+    m_daily = ev.evaluate(sig, prices, horizon=1, frequency="daily")
 
     assert m_default.frequency == "daily"
     assert m_default.frequency == m_daily.frequency
@@ -483,3 +530,134 @@ def test_default_frequency_is_daily() -> None:
     assert m_default.n_observations == m_daily.n_observations
     if np.isfinite(m_default.ic_mean) and np.isfinite(m_daily.ic_mean):
         assert m_default.ic_mean == pytest.approx(m_daily.ic_mean)
+
+
+# ==========================================================================
+# DD-009 — prices input and forward_returns_fn override
+# ==========================================================================
+
+
+def test_evaluate_accepts_prices_and_computes_returns_internally() -> None:
+    """Default path: prices in, evaluator computes returns. Result matches
+    manually-computing returns and passing via the override hook."""
+    rng = np.random.default_rng(99)
+    dates = pd.date_range("2024-01-01", periods=120, freq="B", tz="UTC")
+    assets = [f"A{i}" for i in range(10)]
+    signal = _panel_series(dates, assets, rng.normal(size=(len(dates), len(assets))))
+    log_returns = _panel_series(dates, assets, rng.normal(scale=0.01, size=(len(dates), len(assets))))
+    prices = _prices_from_log_returns(log_returns)
+
+    ev = SignalEvaluator()
+
+    def _returns_override(
+        _prices: pd.Series, _horizon: int, _frequency: str
+    ) -> pd.Series:
+        return log_returns
+
+    m_default = ev.evaluate(signal=signal, prices=prices, horizon=1)
+    m_override = ev.evaluate(
+        signal=signal,
+        prices=prices,
+        horizon=1,
+        forward_returns_fn=_returns_override,
+    )
+    assert m_default.n_observations == m_override.n_observations
+    if np.isfinite(m_default.ic_mean) and np.isfinite(m_override.ic_mean):
+        assert m_default.ic_mean == pytest.approx(m_override.ic_mean)
+
+
+def test_evaluate_forward_returns_fn_override_used_when_supplied() -> None:
+    """The override hook bypasses internal log-return computation.
+
+    A negated-returns override should produce IC of opposite sign to
+    the default path's IC, proving the override is actually used.
+    """
+    dates = pd.date_range("2024-01-01", periods=120, freq="B", tz="UTC")
+    assets = [f"A{i}" for i in range(15)]
+    rng = np.random.default_rng(7)
+    horizon = 1
+    signal_vals = rng.normal(size=(len(dates), len(assets)))
+    signal = _panel_series(dates, assets, signal_vals)
+    log_return_vals = np.roll(signal_vals, +(horizon + 1), axis=0) * 0.01
+    log_returns = _panel_series(dates, assets, log_return_vals)
+    prices = _prices_from_log_returns(log_returns)
+
+    ev = SignalEvaluator()
+    m_default = ev.evaluate(signal=signal, prices=prices, horizon=horizon)
+
+    def _negated_log_returns(
+        p: pd.Series, _horizon: int, _frequency: str
+    ) -> pd.Series:
+        asset_level = p.index.names[1] if p.index.names[1] is not None else 1
+        log_p = np.log(p.astype(float).sort_index())
+        shifted = log_p.groupby(level=asset_level, sort=False).shift(1)
+        return -1.0 * (log_p - shifted).astype(float)
+
+    m_override = ev.evaluate(
+        signal=signal,
+        prices=prices,
+        horizon=horizon,
+        forward_returns_fn=_negated_log_returns,
+    )
+
+    assert m_default.ic_mean > 0.5, f"default ic_mean was {m_default.ic_mean}"
+    assert m_override.ic_mean < -0.5, f"override ic_mean was {m_override.ic_mean}"
+    assert abs(m_default.ic_mean + m_override.ic_mean) < 0.1
+
+
+def test_evaluate_rejects_non_datetime_single_asset_index() -> None:
+    prices = pd.Series([100.0, 101.0], index=pd.RangeIndex(2), dtype=float)
+    signal = pd.Series([0.5, -0.5], index=pd.RangeIndex(2), dtype=float)
+    with pytest.raises(ValueError, match="DatetimeIndex"):
+        SignalEvaluator().evaluate(signal=signal, prices=prices, horizon=1)
+
+
+def test_evaluate_rejects_three_level_multiindex() -> None:
+    dates = pd.date_range("2024-01-01", periods=5, freq="B", tz="UTC")
+    idx = pd.MultiIndex.from_product(
+        [dates, ["A", "B"], ["x"]], names=["date", "asset", "extra"]
+    )
+    prices = pd.Series(np.linspace(100.0, 110.0, len(idx)), index=idx)
+    signal = pd.Series(0.5, index=idx)
+    with pytest.raises(ValueError, match="2 levels"):
+        SignalEvaluator().evaluate(signal=signal, prices=prices, horizon=1)
+
+
+def test_evaluate_rejects_three_level_multiindex_on_signal() -> None:
+    dates = pd.date_range("2024-01-01", periods=5, freq="B", tz="UTC")
+    idx_ok = pd.MultiIndex.from_product([dates, ["A", "B"]], names=["date", "asset"])
+    prices = pd.Series(np.linspace(100.0, 110.0, len(idx_ok)), index=idx_ok)
+    idx_bad = pd.MultiIndex.from_product(
+        [dates, ["A", "B"], ["x"]], names=["date", "asset", "extra"]
+    )
+    signal = pd.Series(0.5, index=idx_bad)
+    with pytest.raises(ValueError, match="2 levels"):
+        SignalEvaluator().evaluate(signal=signal, prices=prices, horizon=1)
+
+
+def test_compute_log_returns_from_prices_matches_manual_calc() -> None:
+    """The helper produces the expected log returns for both single-asset
+    and MultiIndex inputs."""
+    dates = pd.date_range("2024-01-01", periods=20, freq="B", tz="UTC")
+    rng = np.random.default_rng(88)
+    log_returns = pd.Series(rng.normal(scale=0.01, size=len(dates)), index=dates)
+    prices = _prices_from_log_returns(log_returns)
+    computed = SignalEvaluator._compute_log_returns_from_prices(prices)
+    pd.testing.assert_series_equal(
+        computed.iloc[1:],
+        log_returns.iloc[1:],
+        check_names=False,
+    )
+
+    assets = ["A", "B", "C"]
+    panel_lr = _panel_series(
+        dates, assets, rng.normal(scale=0.01, size=(len(dates), len(assets)))
+    )
+    panel_prices = _prices_from_log_returns(panel_lr)
+    computed_panel = SignalEvaluator._compute_log_returns_from_prices(panel_prices)
+    for asset in assets:
+        pd.testing.assert_series_equal(
+            computed_panel.xs(asset, level="asset").iloc[1:],
+            panel_lr.xs(asset, level="asset").iloc[1:],
+            check_names=False,
+        )

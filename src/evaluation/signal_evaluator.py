@@ -29,7 +29,7 @@ expressed in the same unit as ``horizon``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Literal, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,6 +37,28 @@ from scipy.stats import spearmanr
 
 
 Frequency = Literal["daily", "weekly", "monthly"]
+
+
+class ForwardReturnsFn(Protocol):
+    """Callable that computes 1-period log returns from a price series.
+
+    Default behaviour (used when caller passes None) is
+    log(prices / prices.shift(1)), applied per asset for MultiIndex inputs.
+    Custom implementations can return any return construct the signal is
+    meant to predict (e.g. basis-adjusted returns, carry-net returns).
+
+    The returned Series MUST have the same index shape as `prices` — single
+    DatetimeIndex for single-asset, MultiIndex (date, asset) for
+    cross-sectional. The evaluator's downstream resample + forward-shift
+    logic assumes 1-period returns aligned to the price index.
+    """
+
+    def __call__(
+        self,
+        prices: pd.Series,
+        horizon: int,
+        frequency: str,
+    ) -> pd.Series: ...
 
 
 # Periods per year and resample rule per supported frequency.
@@ -170,6 +192,28 @@ class SignalEvaluator:
     """Evaluate a signal against forward returns at a chosen frequency."""
 
     @staticmethod
+    def _compute_log_returns_from_prices(prices: pd.Series) -> pd.Series:
+        """Compute 1-period log returns from prices.
+
+        Single-asset (DatetimeIndex): log(p / p.shift(1)).
+        Cross-sectional (MultiIndex date, asset): applied per asset via
+        groupby on level=1, preserving the MultiIndex.
+
+        Per CONVENTIONS §3.2, log returns are the right convention for the
+        statistical machinery below (IC, Sharpe).
+        """
+        prices = prices.astype(float).sort_index()
+
+        if isinstance(prices.index, pd.MultiIndex):
+            asset_level = prices.index.names[1] if prices.index.names[1] is not None else 1
+            log_p = np.log(prices)
+            shifted = log_p.groupby(level=asset_level, sort=False).shift(1)
+            return (log_p - shifted).astype(float)
+
+        log_p = np.log(prices)
+        return (log_p - log_p.shift(1)).astype(float)
+
+    @staticmethod
     def _apply_forward_return_convention(
         returns: pd.Series, horizon: int
     ) -> pd.Series:
@@ -272,7 +316,7 @@ class SignalEvaluator:
     def _evaluate_single_asset(
         self,
         signal: pd.Series,
-        forward_returns: pd.Series,
+        log_returns: pd.Series,
         horizon: int,
         frequency: str,
     ) -> SignalMetrics:
@@ -283,7 +327,7 @@ class SignalEvaluator:
         rolling_window = _ROLLING_IC_WINDOW[frequency]
 
         sig = signal.astype(float).sort_index()
-        fwd_full = forward_returns.astype(float).sort_index()
+        fwd_full = log_returns.astype(float).sort_index()
         fwd = fwd_full.shift(-horizon - 1)
 
         paired = pd.concat({"signal": sig, "fwd": fwd}, axis=1, join="inner").dropna()
@@ -386,9 +430,11 @@ class SignalEvaluator:
     def evaluate(
         self,
         signal: pd.Series,
-        forward_returns: pd.Series,
+        prices: pd.Series,
         horizon: int,
         frequency: Frequency = "daily",
+        *,
+        forward_returns_fn: ForwardReturnsFn | None = None,
     ) -> SignalMetrics:
         """Evaluate a signal vs forward returns at a given horizon and frequency.
 
@@ -396,32 +442,67 @@ class SignalEvaluator:
             signal: Signal Series indexed by (date, asset) for the multi-asset
                 path, or by a plain ``DatetimeIndex`` for a single-asset signal.
                 Values should be in [-1, 1].
-            forward_returns: 1-period log returns aligned to the signal index.
-                The forward-return shift is applied internally as
-                ``returns.shift(-(horizon + 1))`` (per asset for MultiIndex).
-                Internal resampling will compound (sum) log returns to ``frequency``
-                before shifting.
+            prices: Price levels (positive, float dtype). Single-asset series use
+                a ``DatetimeIndex``; cross-sectional series use a 2-level
+                ``MultiIndex`` (date, asset). The evaluator computes 1-period log
+                returns internally as ``log(p / p.shift(1))`` (per asset for
+                MultiIndex inputs) unless ``forward_returns_fn`` is supplied.
             horizon: Forward horizon in *periods at* ``frequency``. For
                 ``frequency='monthly'`` and ``horizon=3``, evaluates predictive
                 power over the next 3 months.
             frequency: 'daily' (default), 'weekly', or 'monthly'. Both signal
                 and returns are resampled to this frequency before evaluation.
+            forward_returns_fn: Optional override at the price-to-returns
+                boundary. When provided, replaces the internal log-return
+                computation entirely; see DD-009 for the architectural reasoning.
+                The callable must return 1-period log returns with the same index
+                shape as ``prices``.
 
         Returns:
             SignalMetrics. ``forward_return_horizon`` is in periods of ``frequency``.
 
         Raises:
-            ValueError: If ``frequency`` is unknown or ``horizon <= 0``.
+            ValueError: If ``frequency`` is unknown, ``horizon <= 0``, or index
+                shapes are invalid.
         """
+        if isinstance(prices.index, pd.MultiIndex):
+            if prices.index.nlevels != 2:
+                raise ValueError(
+                    "Cross-sectional prices must be MultiIndex with 2 levels "
+                    f"(date, asset); got {prices.index.nlevels} levels."
+                )
+        elif not isinstance(prices.index, pd.DatetimeIndex):
+            raise ValueError(
+                "Single-asset prices must have a DatetimeIndex; got "
+                f"{type(prices.index).__name__}."
+            )
+
+        if isinstance(signal.index, pd.MultiIndex):
+            if signal.index.nlevels != 2:
+                raise ValueError(
+                    "Cross-sectional signal must be MultiIndex with 2 levels "
+                    f"(date, asset); got {signal.index.nlevels} levels."
+                )
+        elif not isinstance(signal.index, pd.DatetimeIndex):
+            raise ValueError(
+                "Single-asset signal must have a DatetimeIndex; got "
+                f"{type(signal.index).__name__}."
+            )
+
         if horizon <= 0:
             raise ValueError("horizon must be a positive integer.")
         _validate_frequency(frequency)
 
         periods_per_year, _ = _FREQUENCY_TABLE[frequency]
 
+        if forward_returns_fn is None:
+            log_returns = self._compute_log_returns_from_prices(prices)
+        else:
+            log_returns = forward_returns_fn(prices, horizon, frequency)
+
         # Resample inputs to the target frequency. At 'daily' this is a no-op.
         sig_resampled = _resample_signal(signal, frequency)
-        ret_resampled = _resample_log_returns(forward_returns, frequency)
+        ret_resampled = _resample_log_returns(log_returns, frequency)
 
         if sig_resampled.index.nlevels == 1:
             return self._evaluate_single_asset(
