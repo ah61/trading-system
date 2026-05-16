@@ -248,6 +248,30 @@ class DataStore:
         df.index = pd.DatetimeIndex(ts, name="timestamp")
         return df
 
+    def read_derived_by_table(self, table: str) -> pd.DataFrame:
+        """Read a derived table by exact table name.
+
+        Used by VariableCatalog for transformed-variable cache lookup where the
+        table name includes a spec hash. Returns a DataFrame with UTC DatetimeIndex.
+
+        Raises:
+            StorageError: If the table does not exist.
+        """
+        _validate_ident(table, "table")
+        with self._connect("derived") as con:
+            if not _table_exists(con, table):
+                raise StorageError(f"Derived table not found: {table}")
+            df = con.execute(
+                f"SELECT * FROM {_quote_ident(table)} ORDER BY timestamp"
+            ).df()
+
+        if "timestamp" not in df.columns:
+            raise StorageError(f"Stored table missing 'timestamp' column: {table}")
+        ts = pd.to_datetime(df["timestamp"], utc=True)
+        df = df.drop(columns=["timestamp"])
+        df.index = pd.DatetimeIndex(ts, name="timestamp")
+        return df
+
     @staticmethod
     def _pick_latest_adjusted_table(candidates: list[str], base: str) -> str | None:
         best_version = -1

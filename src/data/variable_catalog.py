@@ -17,11 +17,14 @@ See ROADMAP.md Milestone 5.7 and DESIGN_DECISIONS.md DD-006 for context.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping
 
+import duckdb
 import numpy as np
 import pandas as pd
 import yaml
@@ -29,8 +32,8 @@ from loguru import logger
 
 from src.data.cached_source import CachedSource
 from src.data.sources.base import DataSource
-from src.data.store import DataStore
-from src.exceptions import TradingSystemError
+from src.data.store import DataStore, _list_tables, _quote_ident
+from src.exceptions import StorageError, TradingSystemError
 
 
 Layer = Literal["raw", "transformed", "derived"]
@@ -57,6 +60,32 @@ class VariableSpec:
     layer: str
     source_file: str
     spec: dict[str, Any] = field(hash=False, compare=False)
+
+
+def _compute_spec_hash(spec: VariableSpec, source_frequency: str) -> str:
+    """Hash the structural fields of a transformation spec.
+
+    Returns first 8 hex chars of sha256.
+    """
+    s = spec.spec
+    payload: dict[str, Any] = {"transformation": s.get("transformation")}
+    if isinstance(s.get("source_variable"), str):
+        payload["source_variable"] = s["source_variable"]
+    elif isinstance(s.get("sources"), list):
+        payload["sources"] = list(s["sources"])
+    if "window" in s:
+        payload["window"] = s["window"]
+    if "annualised" in s:
+        payload["annualised"] = s["annualised"]
+    payload["frequency"] = s.get("frequency")
+    payload["source_frequency"] = source_frequency
+    blob = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:8]
+
+
+def _derived_table_name(name: str, spec_hash: str, frequency: str) -> str:
+    """Format: {varname}__{hash}_{frequency} (single underscore before frequency)."""
+    return f"{name}__{spec_hash}_{frequency}"
 
 
 # YAML files in the catalog. Order matters only for nicer error messages —
@@ -505,8 +534,8 @@ class VariableCatalog:
         Raises:
             CatalogError: If the variable is unknown, the catalogue is in
                 registry-only mode, or the variable's source isn't wired in.
-            ValueError: If the variable is not a raw variable (transformed and
-                derived variables are not yet served by ``get()`` — that's 5.8).
+            ValueError: If the variable is a derived signal/regime (not catalogue-computed)
+                or transformation parameters are invalid.
         """
         if not self._cached_sources or self._store is None:
             raise CatalogError(
@@ -517,11 +546,20 @@ class VariableCatalog:
             raise CatalogError(f"Unknown variable: {name!r}")
 
         spec = self._vars[name]
-        if spec.layer != "raw":
-            raise ValueError(
-                f"Variable {name!r} is layer={spec.layer!r}. Catalogue.get() "
-                f"currently serves only raw variables; transformed/derived are 5.8."
+        if spec.layer == "transformed":
+            return self._get_transformed(
+                name, spec,
+                frequency=frequency, start=start, end=end, force_refresh=force_refresh,
             )
+        if spec.layer == "derived":
+            raise ValueError(
+                f"Variable {name!r} is layer='derived'. The catalogue does not compute "
+                f"derived variables. Signals and models produce derived variables and "
+                f"write them to derived.duckdb directly; the catalogue only reads them "
+                f"back. See DESIGN_DECISIONS.md DD-006."
+            )
+        if spec.layer != "raw":
+            raise ValueError(f"Unknown layer: {spec.layer!r}")
 
         source_name, ticker_or_id = self._resolve_source_and_ticker(spec)
         cached = self._cached_sources.get(source_name)
@@ -564,6 +602,124 @@ class VariableCatalog:
             )
 
         return series
+
+    def _get_transformed(
+        self,
+        name: str,
+        spec: VariableSpec,
+        *,
+        frequency: Frequency | None,
+        start: date | None,
+        end: date | None,
+        force_refresh: bool,
+    ) -> pd.Series:
+        source_freq = self._resolve_source_frequency(spec)
+        spec_hash = _compute_spec_hash(spec, source_freq)
+        out_freq = frequency or str(spec.spec.get("frequency", "daily"))
+        table = _derived_table_name(name, spec_hash, out_freq)
+
+        if not force_refresh:
+            try:
+                df = self._store.read_derived_by_table(table)
+                series = self._series_from_df(df, variable_name=name)
+                return self._slice_series_range(series, start, end)
+            except StorageError:
+                pass
+
+        from src.data.transformation_executor import execute_transformation
+
+        series = execute_transformation(
+            spec,
+            self,
+            frequency=frequency,
+            start=start,
+            end=end,
+            force_refresh=force_refresh,
+        )
+        self._persist_transformed(name, series, spec_hash, out_freq, spec)
+        return self._slice_series_range(series, start, end)
+
+    def _resolve_source_frequency(self, spec: VariableSpec) -> str:
+        s = spec.spec
+        if isinstance(s.get("source_variable"), str):
+            src_name = s["source_variable"]
+            freq = self.get_spec(src_name).spec.get("frequency")
+            if not isinstance(freq, str):
+                raise CatalogError(f"Source {src_name!r} missing 'frequency'.")
+            return freq
+        sources = s.get("sources")
+        if isinstance(sources, list) and sources:
+            src_name = str(sources[0])
+            freq = self.get_spec(src_name).spec.get("frequency")
+            if not isinstance(freq, str):
+                raise CatalogError(f"Source {src_name!r} missing 'frequency'.")
+            return freq
+        raise CatalogError(f"Transformation {spec.name!r} has no source_variable or sources.")
+
+    def _persist_transformed(
+        self,
+        name: str,
+        series: pd.Series,
+        spec_hash: str,
+        frequency: str,
+        spec: VariableSpec,
+    ) -> None:
+        derived_name = f"{name}__{spec_hash}"
+        df = pd.DataFrame({"close": series.astype(np.float64)})
+        self._store.write_derived(df, name=derived_name, frequency=frequency)
+        logger.info("Wrote transformed variable {} with spec_hash {}", name, spec_hash)
+
+        path = self._store.derived_db_path
+        if path.exists():
+            with duckdb.connect(str(path)) as con:
+                prefix = f"{name}__"
+                for table in _list_tables(con):
+                    if table.startswith(prefix) and spec_hash not in table:
+                        logger.info("Derived cache cruft for {}: table {}", name, table)
+
+        self._record_transformation_metadata(name, spec_hash, frequency, spec.source_file)
+
+    def _record_transformation_metadata(
+        self,
+        variable_name: str,
+        spec_hash: str,
+        frequency: str,
+        source_yaml_path: str,
+    ) -> None:
+        path = self._store.derived_db_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        created_at = datetime.now(timezone.utc)
+        with duckdb.connect(str(path)) as con:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS _transformation_metadata (
+                    variable_name VARCHAR,
+                    spec_hash VARCHAR,
+                    frequency VARCHAR,
+                    created_at TIMESTAMP,
+                    source_yaml_path VARCHAR
+                )
+                """
+            )
+            con.execute(
+                f"""
+                INSERT INTO {_quote_ident('_transformation_metadata')}
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [variable_name, spec_hash, frequency, created_at, source_yaml_path],
+            )
+
+    @staticmethod
+    def _slice_series_range(
+        series: pd.Series, start: date | None, end: date | None
+    ) -> pd.Series:
+        if start is None and end is None:
+            return series
+        fetch_start = start or date(2010, 1, 1)
+        fetch_end = end or date.today()
+        start_ts = pd.Timestamp(fetch_start, tz="UTC")
+        end_ts = pd.Timestamp(fetch_end, tz="UTC") + pd.Timedelta(days=1)
+        return series[(series.index >= start_ts) & (series.index < end_ts)]
 
     # ---- internals for stateful access ----------------------------------
 

@@ -582,13 +582,167 @@ def test_get_raises_for_unknown_variable(tmp_path: Path, tmp_store: DataStore) -
         cat.get("DOES_NOT_EXIST")
 
 
-def test_get_raises_for_transformed_variable(tmp_path: Path, tmp_store: DataStore) -> None:
+_TLT_CATALOG = {
+    "variables/market.yaml": """
+        TLT_CLOSE:
+          layer: raw
+          source: yahoo
+          ticker: TLT
+          frequency: daily
+    """,
+    "variables/transformations.yaml": """
+        TLT_LOG_RET:
+          layer: transformed
+          source_variable: TLT_CLOSE
+          transformation: log_return
+          window: 1
+          frequency: daily
+    """,
+}
+
+
+def test_get_serves_transformed_variable(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="yahoo", frequency="daily")
+    cat = _build_cat(tmp_path, _TLT_CATALOG, sources={"yahoo": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 6, 30)
+    series = cat.get("TLT_LOG_RET", frequency="daily", start=start, end=end)
+    raw = cat.get("TLT_CLOSE", frequency="daily", start=start, end=end)
+    expected = np.log(raw / raw.shift(1)).reindex(series.index)
+    pd.testing.assert_series_equal(series, expected, check_names=False, atol=1e-12)
+    assert series.name == "TLT_LOG_RET"
+
+
+def test_get_caches_transformed_variable_after_first_compute(
+    tmp_path: Path, tmp_store: DataStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubSource(name="yahoo", frequency="daily")
+    cat = _build_cat(tmp_path, _TLT_CATALOG, sources={"yahoo": stub}, store=tmp_store)
+    calls: list[int] = []
+    import src.data.transformation_executor as ex_mod
+
+    original = ex_mod.execute_transformation
+
+    def counting_execute(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ex_mod, "execute_transformation", counting_execute)
+    start, end = date(2020, 1, 1), date(2020, 3, 31)
+    cat.get("TLT_LOG_RET", frequency="daily", start=start, end=end)
+    cat.get("TLT_LOG_RET", frequency="daily", start=start, end=end)
+    assert len(calls) == 1
+
+
+def test_get_force_refresh_bypasses_transformed_cache(
+    tmp_path: Path, tmp_store: DataStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubSource(name="yahoo", frequency="daily")
+    cat = _build_cat(tmp_path, _TLT_CATALOG, sources={"yahoo": stub}, store=tmp_store)
+    calls: list[int] = []
+    import src.data.transformation_executor as ex_mod
+
+    original = ex_mod.execute_transformation
+
+    def counting_execute(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ex_mod, "execute_transformation", counting_execute)
+    start, end = date(2020, 1, 1), date(2020, 3, 31)
+    cat.get("TLT_LOG_RET", frequency="daily", start=start, end=end)
+    cat.get("TLT_LOG_RET", frequency="daily", start=start, end=end, force_refresh=True)
+    assert len(calls) == 2
+
+
+def test_get_invalidates_cache_on_spec_change(tmp_path: Path, tmp_store: DataStore) -> None:
     stub = _StubSource(name="fred", frequency="daily")
-    cat = _build_cat(
-        tmp_path, _RAW_PLUS_TRANSFORMED, sources={"fred": stub}, store=tmp_store,
+    zscore_10 = {
+        **_DFF_MACRO,
+        "variables/transformations.yaml": """
+            DFF_Z:
+              layer: transformed
+              source_variable: DFF
+              transformation: rolling_zscore
+              window: 10
+              frequency: daily
+        """,
+    }
+    cat10 = _build_cat(tmp_path, zscore_10, sources={"fred": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 3, 31)
+    out10 = cat10.get("DFF_Z", frequency="daily", start=start, end=end)
+
+    _write_catalog(tmp_path, {
+        **_DFF_MACRO,
+        "variables/transformations.yaml": """
+            DFF_Z:
+              layer: transformed
+              source_variable: DFF
+              transformation: rolling_zscore
+              window: 20
+              frequency: daily
+        """,
+    })
+    cat20 = VariableCatalog.load(
+        tmp_path, sources={"fred": stub}, store=tmp_store,
     )
-    with pytest.raises(ValueError, match="layer='transformed'"):
-        cat.get("DFF_Z")
+    out20 = cat20.get("DFF_Z", frequency="daily", start=start, end=end)
+    raw = cat20.get("DFF", frequency="daily", start=start, end=end)
+    expected20 = ((raw - raw.rolling(20).mean()) / raw.rolling(20).std()).reindex(out20.index)
+    pd.testing.assert_series_equal(out20, expected20, check_names=False, atol=1e-12)
+    assert not np.allclose(
+        out10.fillna(0.0).to_numpy(), out20.fillna(0.0).to_numpy(), atol=1e-12, equal_nan=True,
+    )
+
+    from src.data.variable_catalog import _compute_spec_hash
+
+    spec20 = cat20.get_spec("DFF_Z")
+    h10 = _compute_spec_hash(cat10.get_spec("DFF_Z"), "daily")
+    h20 = _compute_spec_hash(spec20, "daily")
+    assert h10 != h20
+    assert tmp_store.derived_db_path.exists()
+
+
+def test_get_raises_for_derived_variable(tmp_path: Path, tmp_store: DataStore) -> None:
+    _write_catalog(tmp_path, {
+        **_DFF_MACRO,
+        "derived_variables.yaml": """
+            fake_signal:
+              layer: derived
+              type: signal
+              inputs: [DFF]
+              frequency: daily
+        """,
+    })
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = VariableCatalog.load(tmp_path, sources={"fred": stub}, store=tmp_store)
+    with pytest.raises(ValueError, match="catalogue does not compute"):
+        cat.get("fake_signal")
+
+
+def test_transformation_metadata_table_populated_after_write(
+    tmp_path: Path, tmp_store: DataStore,
+) -> None:
+    import duckdb
+
+    stub = _StubSource(name="yahoo", frequency="daily")
+    cat = _build_cat(tmp_path, _TLT_CATALOG, sources={"yahoo": stub}, store=tmp_store)
+    cat.get("TLT_LOG_RET", frequency="daily", start=date(2020, 1, 1), end=date(2020, 3, 31))
+
+    from src.data.variable_catalog import _compute_spec_hash
+
+    spec = cat.get_spec("TLT_LOG_RET")
+    spec_hash = _compute_spec_hash(spec, "daily")
+    with duckdb.connect(str(tmp_store.derived_db_path)) as con:
+        row = con.execute(
+            "SELECT variable_name, spec_hash, frequency, source_yaml_path "
+            "FROM _transformation_metadata WHERE variable_name = ?",
+            ["TLT_LOG_RET"],
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "TLT_LOG_RET"
+    assert row[1] == spec_hash
+    assert row[2] == "daily"
+    assert "transformations.yaml" in str(row[3])
 
 
 def test_universe_expansion_produces_per_ticker_specs(tmp_path: Path) -> None:
