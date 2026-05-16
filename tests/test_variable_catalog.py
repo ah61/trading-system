@@ -7,11 +7,18 @@ project catalog. The real catalog is exercised by import-time sanity in
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
+import numpy as np
+import pandas as pd
 import pytest
 
+from src.data.sources.base import DataSource
+from src.data.store import DataStore
 from src.data.variable_catalog import CatalogError, VariableCatalog
 
 
@@ -359,6 +366,250 @@ def test_used_by_transitive(tmp_path: Path) -> None:
     cat = VariableCatalog.load(tmp_path)
     assert cat.get_used_by("DFF") == ["A"]
     assert cat.get_used_by_transitive("DFF") == ["A", "sig"]
+
+
+# ---------------------------------------------------------------------------
+# Stateful data access (5.7)
+# ---------------------------------------------------------------------------
+
+
+_DFF_MACRO = {
+    "variables/macro.yaml": """
+        DFF:
+          layer: raw
+          source: FRED
+          series_id: DFF
+          frequency: daily
+    """,
+}
+
+_GS10_MONTHLY = {
+    "variables/macro.yaml": """
+        GS10:
+          layer: raw
+          source: FRED
+          series_id: GS10
+          frequency: monthly
+    """,
+}
+
+_RAW_PLUS_TRANSFORMED = {
+    **_DFF_MACRO,
+    "variables/transformations.yaml": """
+        DFF_Z:
+          layer: transformed
+          source_variable: DFF
+          transformation: rolling_zscore
+          window: 252
+          frequency: daily
+    """,
+}
+
+
+class _StubSource(DataSource):
+    """Deterministic in-memory source for stateful catalogue tests."""
+
+    def __init__(
+        self,
+        name: str,
+        frequency: str,
+        value_fn: Callable[[pd.Timestamp], float] | None = None,
+    ) -> None:
+        self.name = name
+        self.frequency = frequency
+        self._value_fn = value_fn or self._default_value_fn
+        self.call_count = 0
+        self.last_fetch: tuple[str, date, date] | None = None
+
+    @staticmethod
+    def _default_value_fn(ts: pd.Timestamp) -> float:
+        return float(hash(ts.date()) % 10_000) / 100.0
+
+    def fetch(self, ticker: str, start: date, end: date) -> pd.DataFrame:
+        self.call_count += 1
+        self.last_fetch = (ticker, start, end)
+        if self.frequency == "daily":
+            index = pd.bdate_range(start, end, tz="UTC")
+        elif self.frequency == "monthly":
+            index = pd.date_range(start, end, freq="ME", tz="UTC")
+        else:
+            raise ValueError(f"Unsupported stub frequency: {self.frequency!r}")
+        values = np.array([self._value_fn(ts) for ts in index], dtype=np.float64)
+        df = pd.DataFrame({"close": values}, index=index)
+        self.validate(df)
+        return df
+
+    def get_metadata(self, ticker: str) -> dict[str, Any]:
+        return {
+            "source": self.name,
+            "ticker": ticker,
+            "frequency": self.frequency,
+            "known_limitations": "stub",
+        }
+
+
+@pytest.fixture
+def tmp_store(tmp_path: Path) -> DataStore:
+    return DataStore(data_dir=tmp_path)
+
+
+def _build_cat(
+    tmp_path: Path,
+    catalog_files: dict[str, str],
+    sources: dict[str, DataSource],
+    store: DataStore,
+) -> VariableCatalog:
+    _write_catalog(tmp_path, catalog_files)
+    return VariableCatalog.load(tmp_path, sources=sources, store=store)
+
+
+def test_get_returns_series_for_raw_variable(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = _build_cat(tmp_path, _DFF_MACRO, sources={"fred": stub}, store=tmp_store)
+    series = cat.get("DFF", start=date(2020, 1, 1), end=date(2020, 12, 31))
+    assert isinstance(series, pd.Series)
+    assert series.dtype == np.float64
+    assert series.name == "DFF"
+    assert len(series) > 0
+
+
+def test_get_uses_native_frequency_when_unspecified(
+    tmp_path: Path, tmp_store: DataStore,
+) -> None:
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = _build_cat(tmp_path, _DFF_MACRO, sources={"fred": stub}, store=tmp_store)
+    series = cat.get("DFF", start=date(2020, 1, 1), end=date(2020, 3, 31))
+    expected = pd.bdate_range(date(2020, 1, 1), date(2020, 3, 31), tz="UTC")
+    assert len(series) == len(expected)
+    assert series.index.equals(expected)
+
+
+def test_get_resamples_daily_to_monthly(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = _build_cat(tmp_path, _DFF_MACRO, sources={"fred": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 12, 31)
+    daily = cat.get("DFF", start=start, end=end)
+    monthly = cat.get("DFF", frequency="monthly", start=start, end=end)
+    assert 10 <= len(monthly) <= 12
+    for month_end in monthly.index:
+        month_start = month_end.replace(day=1)
+        daily_slice = daily.loc[month_start:month_end]
+        assert monthly.loc[month_end] == daily_slice.iloc[-1]
+
+
+def test_get_forward_fills_monthly_to_daily(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="fred", frequency="monthly")
+    cat = _build_cat(tmp_path, _GS10_MONTHLY, sources={"fred": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 12, 31)
+    series = cat.get("GS10", frequency="daily", start=start, end=end)
+    assert isinstance(series.index, pd.DatetimeIndex)
+    assert str(series.index.tz) in ("UTC", "UTC+00:00")
+    assert pd.infer_freq(series.index) == "B"
+    assert not series.isna().any()
+    # Step-flat within a month (no interpolation): two consecutive business days.
+    feb_days = series.loc["2020-02-03":"2020-02-29"]
+    assert len(feb_days) >= 2
+    assert feb_days.iloc[0] == feb_days.iloc[1]
+
+
+def test_get_raises_in_registry_only_mode(tmp_path: Path) -> None:
+    _write_catalog(tmp_path, _DFF_MACRO)
+    cat = VariableCatalog.load(tmp_path)
+    with pytest.raises(CatalogError, match="registry-only mode"):
+        cat.get("DFF")
+
+
+def test_get_raises_for_unknown_variable(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = _build_cat(tmp_path, _DFF_MACRO, sources={"fred": stub}, store=tmp_store)
+    with pytest.raises(CatalogError, match="Unknown variable"):
+        cat.get("DOES_NOT_EXIST")
+
+
+def test_get_raises_for_transformed_variable(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = _build_cat(
+        tmp_path, _RAW_PLUS_TRANSFORMED, sources={"fred": stub}, store=tmp_store,
+    )
+    with pytest.raises(ValueError, match="layer='transformed'"):
+        cat.get("DFF_Z")
+
+
+def test_universe_expansion_produces_per_ticker_specs(tmp_path: Path) -> None:
+    universe_dir = tmp_path / "universes"
+    universe_dir.mkdir(parents=True)
+    (universe_dir / "test_universe.yaml").write_text(
+        dedent("""
+            template:
+              layer: raw
+              source: yahoo
+              frequency: daily
+              instrument_type: equity
+              adjustment: auto_adjust
+              variable_name_pattern: "{ticker}_CLOSE"
+            tickers:
+              - AAA
+              - BBB
+              - CCC
+        """).strip() + "\n",
+        encoding="utf-8",
+    )
+    cat = VariableCatalog.load(tmp_path)
+    names = set(cat.names())
+    assert {"AAA_CLOSE", "BBB_CLOSE", "CCC_CLOSE"} <= names
+    spec = cat.get_spec("AAA_CLOSE")
+    assert spec.layer == "raw"
+    assert spec.spec["ticker"] == "AAA"
+    assert spec.spec["source"] == "yahoo"
+
+
+def test_universe_expanded_variable_works_with_get(
+    tmp_path: Path, tmp_store: DataStore,
+) -> None:
+    universe_dir = tmp_path / "universes"
+    universe_dir.mkdir(parents=True)
+    (universe_dir / "test_universe.yaml").write_text(
+        dedent("""
+            template:
+              layer: raw
+              source: yahoo
+              frequency: daily
+              instrument_type: equity
+              adjustment: auto_adjust
+              variable_name_pattern: "{ticker}_CLOSE"
+            tickers:
+              - AAA
+              - BBB
+              - CCC
+        """).strip() + "\n",
+        encoding="utf-8",
+    )
+    stub = _StubSource(name="yahoo", frequency="daily")
+    cat = VariableCatalog.load(tmp_path, sources={"yahoo": stub}, store=tmp_store)
+    series = cat.get("AAA_CLOSE", start=date(2020, 1, 1), end=date(2020, 12, 31))
+    assert isinstance(series, pd.Series)
+    assert series.name == "AAA_CLOSE"
+    assert len(series) > 0
+
+
+def test_get_force_refresh_bypasses_cache(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = _build_cat(tmp_path, _DFF_MACRO, sources={"fred": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 1, 31)
+    cat.get("DFF", start=start, end=end)
+    cat.get("DFF", start=start, end=end)
+    assert stub.call_count == 1
+    cat.get("DFF", start=start, end=end, force_refresh=True)
+    assert stub.call_count == 2
+
+
+def test_get_force_refresh_default_false(tmp_path: Path, tmp_store: DataStore) -> None:
+    stub = _StubSource(name="fred", frequency="daily")
+    cat = _build_cat(tmp_path, _DFF_MACRO, sources={"fred": stub}, store=tmp_store)
+    start, end = date(2020, 1, 1), date(2020, 1, 31)
+    cat.get("DFF", start=start, end=end)
+    cat.get("DFF", start=start, end=end)
+    assert stub.call_count == 1
 
 
 # ---------------------------------------------------------------------------

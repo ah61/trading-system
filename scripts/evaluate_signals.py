@@ -80,6 +80,7 @@ def fetch_variables(
     frequency: str | None,
     start: date,
     end: date,
+    force_refresh: bool = False,
 ) -> dict[str, pd.Series]:
     """Fetch a list of variables from the catalogue.
 
@@ -93,10 +94,13 @@ def fetch_variables(
             (the SignalEvaluator frequency layer resamples downstream).
         start: Inclusive start date.
         end: Inclusive end date.
+        force_refresh: If True, bypass the DataStore cache for each fetch.
     """
     out: dict[str, pd.Series] = {}
     for name in names:
-        out[name] = catalog.get(name, frequency=frequency, start=start, end=end)
+        out[name] = catalog.get(
+            name, frequency=frequency, start=start, end=end, force_refresh=force_refresh,
+        )
     return out
 
 
@@ -226,7 +230,7 @@ def evaluate_at_horizons(
 
 
 def evaluate_rates_trend(
-    catalog: VariableCatalog, start: date, end: date,
+    catalog: VariableCatalog, start: date, end: date, *, force_refresh: bool = False,
 ) -> EvaluationResult:
     logger.info("=== Rates Trend ===")
     sig_obj = RatesTrendSignal()
@@ -234,6 +238,7 @@ def evaluate_rates_trend(
     inputs = fetch_variables(
         catalog, sig_obj.required_variables,
         frequency=sig_obj.frequency, start=start, end=end,
+        force_refresh=force_refresh,
     )
     signal = sig_obj.compute(inputs).dropna()
     # Forward returns from the same TLT_CLOSE series.
@@ -244,7 +249,7 @@ def evaluate_rates_trend(
 
 
 def evaluate_fx_carry(
-    catalog: VariableCatalog, start: date, end: date,
+    catalog: VariableCatalog, start: date, end: date, *, force_refresh: bool = False,
 ) -> EvaluationResult:
     logger.info("=== FX Carry ===")
     sig_obj = FXCarrySignal()
@@ -253,6 +258,7 @@ def evaluate_fx_carry(
     rate_inputs = fetch_variables(
         catalog, sig_obj.required_variables,
         frequency=sig_obj.frequency, start=start, end=end,
+        force_refresh=force_refresh,
     )
     signal = sig_obj.compute(rate_inputs).dropna()
 
@@ -264,6 +270,7 @@ def evaluate_fx_carry(
     spot_inputs = fetch_variables(
         catalog, FX_SPOT_VARIABLES,
         frequency="daily", start=start, end=end,
+        force_refresh=force_refresh,
     )
     fwd = fx_carry_forward_returns(spot_series=spot_inputs, pairs_in_signal=pairs_in_signal)
     horizons = [1, 2, 3, 6]  # months
@@ -272,7 +279,7 @@ def evaluate_fx_carry(
 
 
 def evaluate_equity_momentum(
-    catalog: VariableCatalog, start: date, end: date,
+    catalog: VariableCatalog, start: date, end: date, *, force_refresh: bool = False,
 ) -> EvaluationResult:
     logger.info("=== Equity Momentum ===")
     sig_obj = EquityMomentumSignal()
@@ -282,6 +289,7 @@ def evaluate_equity_momentum(
     inputs = fetch_variables(
         catalog, sig_obj.required_variables,
         frequency="daily", start=start, end=end,
+        force_refresh=force_refresh,
     )
     signal = sig_obj.compute(inputs).dropna()
     fwd = equity_momentum_forward_returns(inputs)
@@ -374,18 +382,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--refresh", action="store_true",
-        help="Bypass the DataStore cache and re-fetch all data from FRED/Yahoo. "
-             "Note: 5.7 catalogue does not expose a force-refresh flag on get(); "
-             "to force a refresh, delete data/raw/raw.duckdb before running.",
+        help="Bypass the DataStore cache and re-fetch all data from FRED/Yahoo.",
     )
     args = parser.parse_args(argv)
 
     if args.refresh:
-        logger.warning(
-            "--refresh flag is currently advisory under 5.7 (catalogue.get does "
-            "not expose force_refresh). Delete data/raw/raw.duckdb to force "
-            "re-fetch, or extend VariableCatalog.get() in a follow-up."
-        )
+        logger.info("Refresh requested: catalog calls will use force_refresh=True")
 
     catalog = build_catalog()
     targets = [args.signal] if args.signal else list(SIGNAL_REGISTRY.keys())
@@ -393,7 +395,11 @@ def main(argv: list[str] | None = None) -> int:
     results: list[EvaluationResult] = []
     for name in targets:
         try:
-            results.append(SIGNAL_REGISTRY[name](catalog, args.start, args.end))
+            results.append(
+                SIGNAL_REGISTRY[name](
+                    catalog, args.start, args.end, force_refresh=args.refresh,
+                )
+            )
         except Exception as e:
             logger.exception("Signal {} failed: {}", name, e)
 

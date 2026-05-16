@@ -483,6 +483,7 @@ class VariableCatalog:
         frequency: Frequency | None = None,
         start: date | None = None,
         end: date | None = None,
+        force_refresh: bool = False,
     ) -> pd.Series:
         """Fetch a variable's time series, routing through the appropriate source.
 
@@ -494,6 +495,9 @@ class VariableCatalog:
                 if finer → coarser).
             start: Start date inclusive. If None, returns full cached range.
             end: End date inclusive. If None, returns full cached range.
+            force_refresh: If True, bypass the cache and re-fetch from the source.
+                The fetched range must be a superset of any cached range — see
+                ``CachedSource.fetch_or_load`` for semantics.
 
         Returns:
             A pd.Series indexed by UTC DatetimeIndex, dtype float64.
@@ -538,6 +542,7 @@ class VariableCatalog:
             fetch_start,
             fetch_end,
             frequency=native_freq,
+            force_refresh=force_refresh,
         )
         series = self._series_from_df(df, variable_name=name)
 
