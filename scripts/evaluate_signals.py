@@ -25,7 +25,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -40,6 +39,7 @@ from src.data.store import DataStore
 from src.data.variable_catalog import VariableCatalog
 from src.evaluation.signal_evaluator import SignalEvaluator, SignalMetrics
 from src.reporting.output_manager import OutputManager
+from src.signals.base import Signal
 from src.signals.equities.momentum import EquityMomentumSignal
 from src.signals.fx.carry import FXCarrySignal
 from src.signals.rates.trend import RatesTrendSignal
@@ -90,8 +90,8 @@ def fetch_variables(
         frequency: Target frequency, or ``None`` to keep each variable's
             native frequency. Pass the signal's ``frequency`` here when
             feeding the signal's own inputs; pass ``"daily"`` when fetching
-            the underlying price series used to construct forward returns
-            (the SignalEvaluator frequency layer resamples downstream).
+            instrument prices for evaluation (the SignalEvaluator frequency
+            layer resamples downstream).
         start: Inclusive start date.
         end: Inclusive end date.
         force_refresh: If True, bypass the DataStore cache for each fetch.
@@ -105,103 +105,7 @@ def fetch_variables(
 
 
 # ---------------------------------------------------------------------------
-# Forward-return construction per signal
-# ---------------------------------------------------------------------------
-
-
-def rates_trend_forward_returns(tlt_close: pd.Series) -> pd.Series:
-    """Single-asset daily log returns for TLT."""
-    close = tlt_close.astype(float).sort_index()
-    return np.log(close / close.shift(1)).dropna()
-
-
-def equity_momentum_forward_returns(
-    price_series: dict[str, pd.Series],
-) -> pd.Series:
-    """Per-variable daily log returns, returned as a MultiIndex ``(date, variable)`` Series.
-
-    Asset level uses catalogue variable names (e.g. ``"AAPL_CLOSE"``), matching
-    the signal output's asset level so the SignalEvaluator can align cross-
-    section without translation.
-    """
-    series_by_var = {}
-    for var, close in price_series.items():
-        c = close.astype(float).sort_index()
-        series_by_var[var] = np.log(c / c.shift(1))
-    panel = pd.DataFrame(series_by_var).sort_index()
-    stacked = panel.stack(future_stack=True)
-    stacked.index = stacked.index.set_names(["date", "variable"])
-    return stacked.astype(float)
-
-
-# Maps the FXCarrySignal's mechanical pair labels to the catalogue spot
-# variable used for forward-return construction, plus a negate flag for
-# pairs where the spot variable's market-convention orientation is reversed
-# vs the signal pair (USDXXX vs XXXUSD). See market.yaml for the variable
-# declarations.
-FX_PAIR_TO_SPOT_VARIABLE: dict[str, tuple[str, bool]] = {
-    # signal pair label → (catalogue spot variable name, negate?)
-    "EUR/USD": ("EURUSD", False),
-    "GBP/USD": ("GBPUSD", False),
-    "AUD/USD": ("AUDUSD", False),
-    "NZD/USD": ("NZDUSD", False),
-    "CAD/USD": ("USDCAD", True),
-    "JPY/USD": ("USDJPY", True),
-    "CHF/USD": ("USDCHF", True),
-}
-
-FX_SPOT_VARIABLES: list[str] = sorted({v for v, _ in FX_PAIR_TO_SPOT_VARIABLE.values()})
-
-
-def fx_carry_forward_returns(
-    spot_series: dict[str, pd.Series],
-    pairs_in_signal: list[str],
-) -> pd.Series:
-    """Construct per-pair daily log returns from USD-anchored spot variables.
-
-    Pairs in the signal labelled ``"<X>/USD"`` are mapped to a catalogue spot
-    variable whose orientation may be either ``XXXUSD`` (no negation needed)
-    or ``USDXXX`` (negate). See DD-005 for label convention.
-    """
-    returns_by_var: dict[str, pd.Series] = {}
-    for var, close in spot_series.items():
-        c = close.astype(float).sort_index()
-        returns_by_var[var] = np.log(c / c.shift(1))
-
-    # Common business-day index across all fetched spot rates.
-    common_index: pd.DatetimeIndex | None = None
-    for r in returns_by_var.values():
-        common_index = r.index if common_index is None else common_index.intersection(r.index)
-    if common_index is None:
-        raise RuntimeError("No FX spot data available to construct returns.")
-    common_index = common_index.sort_values()
-
-    series_by_pair: dict[str, pd.Series] = {}
-    missing_pairs: list[str] = []
-    for pair in pairs_in_signal:
-        mapping = FX_PAIR_TO_SPOT_VARIABLE.get(pair)
-        if mapping is None or mapping[0] not in returns_by_var:
-            missing_pairs.append(pair)
-            series_by_pair[pair] = pd.Series(np.nan, index=common_index)
-            continue
-        spot_var, negate = mapping
-        r = returns_by_var[spot_var].reindex(common_index)
-        series_by_pair[pair] = -r if negate else r
-
-    if missing_pairs:
-        logger.warning(
-            "FX Carry: no spot data for {} pair(s): {}. These will be NaN-dropped.",
-            len(missing_pairs), missing_pairs,
-        )
-
-    panel = pd.DataFrame(series_by_pair).sort_index()
-    stacked = panel.stack(future_stack=True)
-    stacked.index = stacked.index.set_names(["date", "pair"])
-    return stacked.astype(float)
-
-
-# ---------------------------------------------------------------------------
-# Evaluation per signal
+# Evaluation
 # ---------------------------------------------------------------------------
 
 
@@ -214,7 +118,7 @@ class EvaluationResult:
 
 def evaluate_at_horizons(
     signal: pd.Series,
-    forward_returns: pd.Series,
+    prices: pd.Series,
     horizons: list[int],
     frequency: str,
 ) -> list[tuple[int, SignalMetrics]]:
@@ -222,79 +126,58 @@ def evaluate_at_horizons(
     out = []
     for h in horizons:
         m = ev.evaluate(
-            signal=signal, forward_returns=forward_returns,
+            signal=signal, prices=prices,
             horizon=h, frequency=frequency,
         )
         out.append((h, m))
     return out
 
 
-def evaluate_rates_trend(
-    catalog: VariableCatalog, start: date, end: date, *, force_refresh: bool = False,
+def evaluate_signal(
+    catalog: VariableCatalog,
+    sig_obj: Signal,
+    start: date,
+    end: date,
+    *,
+    force_refresh: bool = False,
 ) -> EvaluationResult:
-    logger.info("=== Rates Trend ===")
-    sig_obj = RatesTrendSignal()
-    # Signal frequency is daily; native frequency of TLT_CLOSE is daily.
-    inputs = fetch_variables(
+    """Generic signal evaluator. Reads attributes from the signal.
+
+    - required_variables → compute() inputs, fetched at signal.frequency
+    - instruments → instrument_prices() inputs, fetched at "daily"
+    - evaluation_horizons → horizons looped over
+    - frequency → passed to evaluator's frequency layer
+    """
+    logger.info("=== {} ===", sig_obj.name)
+    # Fetch at daily for both compute inputs and prices. The catalogue
+    # forward-fills monthly variables (e.g. non-USD G10 interbank rates)
+    # to daily per DD-004 — the value on each business day is the most
+    # recent published monthly print as of that day. This produces a
+    # signal output with daily-indexed level-0 dates that aligns with
+    # daily prices; the evaluator's frequency layer resamples both to
+    # signal.frequency together.
+    #
+    # The original DD-010 prompt prescribed fetching compute inputs at
+    # signal.frequency. That was wrong: it produced month-start signal
+    # dates that couldn't join with daily price dates and gave N=0.
+    compute_inputs = fetch_variables(
         catalog, sig_obj.required_variables,
-        frequency=sig_obj.frequency, start=start, end=end,
+        frequency="daily",
+        start=start, end=end,
         force_refresh=force_refresh,
     )
-    signal = sig_obj.compute(inputs).dropna()
-    # Forward returns from the same TLT_CLOSE series.
-    fwd = rates_trend_forward_returns(inputs[sig_obj.params["variable"]])
-    horizons = [1, 5, 21, 63]  # days
-    rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
-    return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
-
-
-def evaluate_fx_carry(
-    catalog: VariableCatalog, start: date, end: date, *, force_refresh: bool = False,
-) -> EvaluationResult:
-    logger.info("=== FX Carry ===")
-    sig_obj = FXCarrySignal()
-    # Signal frequency is monthly. DFF is natively daily, the others natively
-    # monthly; catalogue resamples whichever side doesn't match.
-    rate_inputs = fetch_variables(
-        catalog, sig_obj.required_variables,
-        frequency=sig_obj.frequency, start=start, end=end,
+    price_inputs = fetch_variables(
+        catalog, sig_obj.instruments,
+        frequency="daily",
+        start=start, end=end,
         force_refresh=force_refresh,
     )
-    signal = sig_obj.compute(rate_inputs).dropna()
-
-    pairs_in_signal = sorted({p for _, p in signal.index})
-    logger.info("FX Carry pairs in signal: {}", pairs_in_signal)
-
-    # Forward returns from daily spot prices; the SignalEvaluator frequency
-    # layer aggregates to monthly inside evaluate().
-    spot_inputs = fetch_variables(
-        catalog, FX_SPOT_VARIABLES,
-        frequency="daily", start=start, end=end,
-        force_refresh=force_refresh,
+    signal = sig_obj.compute(compute_inputs).dropna()
+    prices = sig_obj.instrument_prices(price_inputs)
+    rows = evaluate_at_horizons(
+        signal, prices, sig_obj.evaluation_horizons,
+        frequency=sig_obj.frequency,
     )
-    fwd = fx_carry_forward_returns(spot_series=spot_inputs, pairs_in_signal=pairs_in_signal)
-    horizons = [1, 2, 3, 6]  # months
-    rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
-    return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
-
-
-def evaluate_equity_momentum(
-    catalog: VariableCatalog, start: date, end: date, *, force_refresh: bool = False,
-) -> EvaluationResult:
-    logger.info("=== Equity Momentum ===")
-    sig_obj = EquityMomentumSignal()
-    logger.info("Equity Momentum universe: {} variables", len(sig_obj.required_variables))
-    # Per-name daily closes serve both the signal (which resamples to monthly
-    # internally) and the forward-return computation.
-    inputs = fetch_variables(
-        catalog, sig_obj.required_variables,
-        frequency="daily", start=start, end=end,
-        force_refresh=force_refresh,
-    )
-    signal = sig_obj.compute(inputs).dropna()
-    fwd = equity_momentum_forward_returns(inputs)
-    horizons = [1, 2, 3, 6]  # months
-    rows = evaluate_at_horizons(signal, fwd, horizons, frequency=sig_obj.frequency)
     return EvaluationResult(sig_obj.name, sig_obj.frequency, rows)
 
 
@@ -339,7 +222,8 @@ def render_report(results: list[EvaluationResult], start: date, end: date) -> st
     lines.append("- **FX Carry:** USD-anchored G10 spot variables (`EURUSD`, `GBPUSD`, "
                  "`AUDUSD`, `NZDUSD`, `USDCAD`, `USDJPY`, `USDCHF`). Pairs labelled "
                  "`<non-USD>/USD` mechanically (DD-005); USDXXX-orientation spots are "
-                 "negated. SignalEvaluator resamples daily returns to monthly internally.")
+                 "inverted in `instrument_prices()`. SignalEvaluator resamples daily "
+                 "returns to monthly internally.")
     lines.append("- **Equity Momentum:** Per-variable daily log returns from "
                  "`{ticker}_CLOSE` catalogue names, resampled to monthly by the frequency layer.")
     lines.append("- **Annualisation:** Sharpe annualised by sqrt(252) for daily, "
@@ -353,11 +237,11 @@ def render_report(results: list[EvaluationResult], start: date, end: date) -> st
 # ---------------------------------------------------------------------------
 
 
-SIGNAL_REGISTRY = {
-    "rates_trend": evaluate_rates_trend,
-    "fx_carry": evaluate_fx_carry,
-    "equity_momentum": evaluate_equity_momentum,
-}
+SIGNAL_REGISTRY: list[type[Signal]] = [
+    RatesTrendSignal,
+    FXCarrySignal,
+    EquityMomentumSignal,
+]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -373,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
         help=f"End date (YYYY-MM-DD). Default: {DEFAULT_END.isoformat()}.",
     )
     parser.add_argument(
-        "--signal", choices=list(SIGNAL_REGISTRY.keys()), default=None,
+        "--signal", choices=[RatesTrendSignal.name, FXCarrySignal.name, EquityMomentumSignal.name],
+        default=None,
         help="Run only one signal. Default: run all three.",
     )
     parser.add_argument(
@@ -390,18 +275,21 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Refresh requested: catalog calls will use force_refresh=True")
 
     catalog = build_catalog()
-    targets = [args.signal] if args.signal else list(SIGNAL_REGISTRY.keys())
 
     results: list[EvaluationResult] = []
-    for name in targets:
+    for sig_cls in SIGNAL_REGISTRY:
+        sig_obj = sig_cls()
+        if args.signal is not None and sig_obj.name != args.signal:
+            continue
         try:
             results.append(
-                SIGNAL_REGISTRY[name](
-                    catalog, args.start, args.end, force_refresh=args.refresh,
+                evaluate_signal(
+                    catalog, sig_obj, args.start, args.end,
+                    force_refresh=args.refresh,
                 )
             )
         except Exception as e:
-            logger.exception("Signal {} failed: {}", name, e)
+            logger.exception("Signal {} failed: {}", sig_cls.__name__, e)
 
     # Print to stdout regardless.
     for r in results:
