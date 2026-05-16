@@ -53,6 +53,8 @@ class RatesTrendSignal(Signal):
     frequency: str = "daily"
     params: dict[str, Any] = {}
     required_variables: list[str] = ["TLT_CLOSE"]
+    evaluation_horizons: list[int] = [1, 5, 21, 63]
+    instruments: list[str] = []
 
     _DEFAULT_CONFIG_PATH = Path("configs/signals/rates_trend.yaml")
 
@@ -64,6 +66,15 @@ class RatesTrendSignal(Signal):
         self.frequency = cfg.frequency
         self.params = cfg.params
         self.required_variables = cfg.required_variables
+        self.instruments = [self.params["variable"]]
+
+    def instrument_prices(self, data: Dict[str, pd.Series]) -> pd.Series:
+        """Single-asset rates trend: return TLT_CLOSE as a plain
+        DatetimeIndex Series (matches SignalEvaluator's single-asset path)."""
+        variable = self.instruments[0]
+        if variable not in data:
+            raise KeyError(f"instrument_prices: missing {variable!r}")
+        return data[variable].astype(float).sort_index()
 
     @classmethod
     def _load_config(cls, config_path: str | Path | None) -> dict[str, Any]:

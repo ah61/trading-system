@@ -57,6 +57,8 @@ class EquityMomentumSignal(Signal):
     frequency: str = "monthly"
     params: dict[str, Any] = {}
     required_variables: list[str] = []
+    evaluation_horizons: list[int] = [1, 2, 3, 6]
+    instruments: list[str] = []
 
     _DEFAULT_CONFIG_PATH = Path("configs/signals/equity_momentum.yaml")
     _UNIVERSE_DIR = Path("configs/data/universes")
@@ -70,6 +72,20 @@ class EquityMomentumSignal(Signal):
         self.frequency = cfg.frequency
         self.params = cfg.params
         self.required_variables = cfg.required_variables
+        self.instruments = list(self.required_variables)
+
+    def instrument_prices(self, data: Dict[str, pd.Series]) -> pd.Series:
+        """Per-ticker price panel, MultiIndex (date, variable) matching
+        the signal output's asset axis name."""
+        from src.utils.panels import pack_panel_to_multiindex
+
+        missing = [n for n in self.instruments if n not in data]
+        if missing:
+            raise KeyError(f"missing instruments: {missing}")
+        return pack_panel_to_multiindex(
+            {n: data[n] for n in self.instruments},
+            asset_level_name="variable",
+        )
 
     @classmethod
     def _load_config(cls, config_path: str | Path | None) -> dict[str, Any]:

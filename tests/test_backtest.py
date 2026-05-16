@@ -1,7 +1,7 @@
 """Tests for walk-forward backtest engines (synthetic data only).
 
 5.7 contract: data is ``Dict[catalogue_variable_name, pd.Series]`` and
-``portfolio_config['instruments']`` enumerates the tradeable instruments.
+``signal.instruments`` enumerates the tradeable instruments.
 """
 
 from __future__ import annotations
@@ -61,7 +61,6 @@ def _price_data(n: int = 40, seed: int = 0) -> Dict[str, pd.Series]:
 def _default_cfg(**overrides: Any) -> dict:
     """Standard portfolio config used across the test suite."""
     cfg = {
-        "instruments": list(_INSTRUMENTS),
         "asset_classes": {"AAA": "equity", "BBB": "equity"},
         "vol_window": 5,
         "sizing_method": "vol_target",
@@ -80,6 +79,8 @@ class _MomentumSignal(Signal):
     frequency = "daily"
     params: Dict[str, Any] = {}
     required_variables = ["AAA", "BBB"]
+    instruments = ["AAA", "BBB"]
+    evaluation_horizons = [1]
 
     def compute(self, data: Dict[str, pd.Series]) -> pd.Series:
         close = data["AAA"].astype(float)
@@ -361,6 +362,41 @@ def test_tearsheet_saves_file(tmp_path: Path) -> None:
     assert output_path.exists()
     assert output_path.stat().st_size > 0
     plt.close(fig)
+
+
+def test_engine_rejects_legacy_portfolio_config_instruments_key() -> None:
+    data = _price_data(50)
+    cfg = _default_cfg(instruments=list(_INSTRUMENTS))
+    with pytest.raises(ValueError, match="portfolio_config\\['instruments'\\] is no longer accepted"):
+        BacktestEngine().run(
+            signals=[_MomentumSignal()],
+            data=data,
+            portfolio_config=cfg,
+            cost_model=CostModel(spread_bps={"AAA": 1.0, "BBB": 1.0}),
+            start_date=data["AAA"].index[0].date(),
+            end_date=data["AAA"].index[-1].date(),
+            method="expanding",
+            train_window=10,
+            test_window=5,
+        )
+
+
+def test_engine_reads_signal_instruments_for_price_panel() -> None:
+    data = _price_data(40)
+    cal = _calendar_from_data(data)
+    cfg = _default_cfg()
+    result = BacktestEngine().run(
+        signals=[_MomentumSignal()],
+        data=data,
+        portfolio_config=cfg,
+        cost_model=CostModel(spread_bps={"AAA": 1.0, "BBB": 1.0}),
+        start_date=cal[0].date(),
+        end_date=cal[-1].date(),
+        method="expanding",
+        train_window=10,
+        test_window=5,
+    )
+    assert len(result.net_returns) == 5
 
 
 def test_summary_dict_has_required_keys() -> None:

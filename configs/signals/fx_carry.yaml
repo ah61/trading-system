@@ -30,6 +30,19 @@ parameters:
     CAD: CAD_RATE
     JPY: JPY_RATE
     CHF: CHF_RATE
+  # Pair label -> { spot variable name, invert flag }.
+  # USDXXX-orientation spots (USDCAD/USDJPY/USDCHF) need inversion so
+  # the evaluator's log returns match the <non-USD>/USD pair convention.
+  # `instruments` is derived from this mapping (unique spot vars, sorted)
+  # at signal init time.
+  pair_to_spot:
+    EUR/USD: { spot: EURUSD, invert: false }
+    GBP/USD: { spot: GBPUSD, invert: false }
+    AUD/USD: { spot: AUDUSD, invert: false }
+    NZD/USD: { spot: NZDUSD, invert: false }
+    CAD/USD: { spot: USDCAD, invert: true }
+    JPY/USD: { spot: USDJPY, invert: true }
+    CHF/USD: { spot: USDCHF, invert: true }
 
 known_limitations:
   - "Carry computed from 3-month interbank rates, not actual forward points;

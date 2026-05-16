@@ -58,6 +58,8 @@ class FXCarrySignal(Signal):
     frequency: str = "daily"
     params: dict[str, Any] = {}
     required_variables: list[str] = []
+    evaluation_horizons: list[int] = [1, 2, 3, 6]
+    instruments: list[str] = []
 
     _DEFAULT_CONFIG_PATH = Path("configs/signals/fx_carry.yaml")
 
@@ -70,6 +72,31 @@ class FXCarrySignal(Signal):
         self.params = cfg.params
         self.required_variables = cfg.required_variables
         self._known_limitations = cfg.known_limitations
+        spot_vars = sorted({v[0] for v in self.params["pair_to_spot"].values()})
+        self.instruments = spot_vars
+
+    def instrument_prices(self, data: Dict[str, pd.Series]) -> pd.Series:
+        """Per-pair price MultiIndex Series with USDXXX-orientation spots
+        pre-inverted (1/p) so the evaluator's internally-computed log
+        returns come out in the correct direction for the <non-USD>/USD
+        pair label convention (DD-005, DD-009).
+
+        Mathematical equivalence vs the old negate-log-return path:
+            log(1/p_t) - log(1/p_{t-1}) = -[log(p_t) - log(p_{t-1})]
+        Inverting price gives identical log returns to negating them.
+        """
+        from src.utils.panels import pack_panel_to_multiindex
+
+        pair_to_spot: dict[str, tuple[str, bool]] = self.params["pair_to_spot"]
+        prices_by_pair: dict[str, pd.Series] = {}
+        for pair, (spot_var, invert) in pair_to_spot.items():
+            if spot_var not in data:
+                continue
+            p = data[spot_var].astype(float).sort_index()
+            prices_by_pair[pair] = (1.0 / p) if invert else p
+        if not prices_by_pair:
+            raise RuntimeError("No spot data available for any declared FX pair.")
+        return pack_panel_to_multiindex(prices_by_pair, asset_level_name="pair")
 
     @classmethod
     def _load_config(cls, config_path: str | Path | None) -> dict[str, Any]:
@@ -111,6 +138,30 @@ class FXCarrySignal(Signal):
         else:
             required_variables = []
 
+        pair_to_spot_raw = params.get("pair_to_spot", {})
+        if not isinstance(pair_to_spot_raw, dict) or not pair_to_spot_raw:
+            raise ValueError(
+                "FXCarrySignal requires parameters.pair_to_spot "
+                "(pair label -> {spot, invert})."
+            )
+        pair_to_spot: dict[str, tuple[str, bool]] = {}
+        for pair_label, mapping in pair_to_spot_raw.items():
+            if not isinstance(mapping, dict):
+                raise TypeError(
+                    f"pair_to_spot[{pair_label!r}] must be a mapping with "
+                    "'spot' and 'invert' keys."
+                )
+            spot = mapping.get("spot")
+            if not isinstance(spot, str) or not spot.strip():
+                raise ValueError(
+                    f"pair_to_spot[{pair_label!r}].spot must be a non-empty string."
+                )
+            if "invert" not in mapping or not isinstance(mapping["invert"], bool):
+                raise ValueError(
+                    f"pair_to_spot[{pair_label!r}].invert must be a boolean."
+                )
+            pair_to_spot[str(pair_label)] = (str(spot), bool(mapping["invert"]))
+
         return _FXCarryConfig(
             name=str(signal_meta.get("name", "fx_carry")),
             asset_class=str(signal_meta.get("asset_class", "fx")),
@@ -123,6 +174,7 @@ class FXCarrySignal(Signal):
                 "n_short": int(params.get("n_short", 3)),
                 "rate_series": dict(rate_series) if isinstance(rate_series, dict) else {},
                 "base_currency": str(params.get("base_currency", "USD")),
+                "pair_to_spot": pair_to_spot,
             },
             required_variables=required_variables,
             known_limitations=known_limitations,

@@ -6,7 +6,7 @@
     and ``PortfolioConstructor`` — still consumes a wide price panel DataFrame
     (columns = instruments). The engine translates between the two at the
     sizing handoff: it assembles a panel from a subset of the Series dict
-    indicated by ``portfolio_config['instruments']``.
+    indicated by ``signal.instruments`` on each signal instance.
 
     The portfolio panel contract is preserved deliberately. Cross-sectional
     vol math and risk parity are naturally expressed on wide panels; rewriting
@@ -185,7 +185,7 @@ def _assemble_price_panel(
     missing = [name for name in instruments if name not in data]
     if missing:
         raise KeyError(
-            f"portfolio_config['instruments'] references variables not present in data: {missing}"
+            f"signal.instruments references variables not present in data: {missing}"
         )
     cols: Dict[str, pd.Series] = {}
     for name in instruments:
@@ -197,7 +197,14 @@ def _assemble_price_panel(
 
 
 class BacktestEngine:
-    """Run a single train/test style backtest with strict causal data feeds."""
+    """Run a single train/test style backtest with strict causal data feeds.
+
+    BacktestEngine consumes the instrument list from ``signal.instruments``
+    rather than ``portfolio_config['instruments']``. ``portfolio_config`` no
+    longer accepts an ``'instruments'`` key; passing one raises ValueError.
+    The instruments list determines which catalogue variables are read for
+    price-panel assembly.
+    """
 
     def run(
         self,
@@ -224,12 +231,9 @@ class BacktestEngine:
             signals: Concrete ``Signal`` instances to combine with equal weights (Phase 1).
             data: ``Dict[catalogue_variable_name, pd.Series]`` (5.7 contract). Each Series is
                 a 1-D time series indexed by UTC ``DatetimeIndex``. Must contain entries for
-                every variable in ``portfolio_config['instruments']`` and every variable
+                every variable in each signal's ``instruments`` list and every variable
                 referenced by ``signals[i].required_variables``.
             portfolio_config: Required keys:
-                  - ``instruments``: list of catalogue variable names representing tradeable
-                    instruments. The price panel handed to the portfolio sizer is assembled
-                    from these (this list replaces the pre-5.7 ``prices_key``).
                   - ``asset_classes``: mapping of instrument -> asset class string.
                 Optional keys: ``sizing_method``, ``target_vol``, ``gross_limit``,
                 ``net_limit``, ``vol_window``.
@@ -247,7 +251,8 @@ class BacktestEngine:
 
         Raises:
             ValueError: If configuration is inconsistent or the calendar is too short.
-            KeyError: If ``portfolio_config['instruments']`` references variables missing from ``data``.
+            KeyError: If ``signal.instruments`` references variables missing from ``data``.
+            ValueError: If ``portfolio_config`` contains a legacy ``'instruments'`` key.
         """
         method_l = str(method).lower().strip()
         if method_l not in {"expanding", "rolling"}:
@@ -259,11 +264,21 @@ class BacktestEngine:
         if not signals:
             raise ValueError("signals must be a non-empty list.")
 
-        instruments = list(portfolio_config.get("instruments", []) or [])
+        if "instruments" in portfolio_config:
+            raise ValueError(
+                "portfolio_config['instruments'] is no longer accepted. Instruments "
+                "are read from signal.instruments. Remove the 'instruments' key from "
+                "portfolio_config."
+            )
+
+        instruments: List[str] = []
+        for sig in signals:
+            for inst in sig.instruments:
+                if inst not in instruments:
+                    instruments.append(inst)
         if not instruments:
-            raise KeyError(
-                "portfolio_config['instruments'] is required (list of catalogue variable names "
-                "representing tradeable instruments). Pre-5.7 'prices_key' is no longer supported."
+            raise ValueError(
+                "signals must declare at least one instrument via signal.instruments."
             )
 
         calendar = _build_calendar(data, start_date, end_date)

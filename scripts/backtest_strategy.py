@@ -52,7 +52,6 @@ SIGNAL_CLASS_REGISTRY: dict[str, type[Signal]] = {
 # Per-signal portfolio wiring — extract to per-signal config when we add a second signal.
 PORTFOLIO_BY_SIGNAL: dict[str, dict[str, Any]] = {
     "rates_trend": {
-        "instruments": ["TLT_CLOSE"],
         "asset_classes": {"TLT_CLOSE": "rates"},
         "sizing_method": "vol_target",
         "target_vol": 0.10,
@@ -112,10 +111,12 @@ def fetch_variables(
     return out
 
 
-def build_cost_model(signal_name: str, portfolio_config: dict[str, Any]) -> CostModel:
+def build_cost_model(
+    signal_name: str, signal: Signal, portfolio_config: dict[str, Any],
+) -> CostModel:
     """Inline defaults for Phase 6 single-signal runs (2 bps spread on rates ETFs)."""
     spread_bps: dict[str, float] = {}
-    for inst in portfolio_config.get("instruments", []):
+    for inst in signal.instruments:
         asset = portfolio_config.get("asset_classes", {}).get(inst, "")
         if asset == "rates" or inst.endswith("_CLOSE"):
             spread_bps[str(inst)] = 2.0
@@ -187,8 +188,20 @@ def run_backtest(
         end=args.end,
         force_refresh=args.refresh,
     )
+    extra_instruments = [n for n in signal.instruments if n not in data]
+    if extra_instruments:
+        data.update(
+            fetch_variables(
+                cat,
+                extra_instruments,
+                frequency="daily",
+                start=args.start,
+                end=args.end,
+                force_refresh=args.refresh,
+            )
+        )
 
-    cost_model = build_cost_model(args.signal, portfolio_config)
+    cost_model = build_cost_model(args.signal, signal, portfolio_config)
     engine = BacktestEngine()
 
     logger.info(
@@ -213,7 +226,7 @@ def run_backtest(
             "method": args.method,
             "start": args.start.isoformat(),
             "end": args.end.isoformat(),
-            "instruments": portfolio_config["instruments"],
+            "instruments": list(signal.instruments),
             "refresh": args.refresh,
         },
     )

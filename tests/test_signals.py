@@ -21,6 +21,8 @@ class _ConcreteSignal(Signal):
     frequency = "daily"
     params = {"window": 5}
     required_variables = ["EURUSD"]
+    instruments = ["EURUSD"]
+    evaluation_horizons = [1]
 
     def compute(self, data: Dict[str, pd.Series]) -> pd.Series:
         s = data["EURUSD"].astype(float)
@@ -59,6 +61,8 @@ def test_get_metadata_returns_required_keys() -> None:
         "frequency",
         "params",
         "required_variables",
+        "instruments",
+        "evaluation_horizons",
     }
 
 
@@ -90,6 +94,11 @@ def _fx_carry_cfg(rate_series: dict[str, str], limitations: list[str] | None = N
             "lookback_smooth": 1,
             "n_long": 2,
             "n_short": 2,
+            "pair_to_spot": {
+                "EUR/USD": {"spot": "EURUSD", "invert": False},
+                "GBP/USD": {"spot": "GBPUSD", "invert": False},
+                "CAD/USD": {"spot": "USDCAD", "invert": True},
+            },
         },
         "known_limitations": list(limitations or []),
     }
