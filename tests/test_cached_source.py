@@ -352,3 +352,64 @@ def test_ticker_with_dash_caches(tmp_path: Path) -> None:
     cached.fetch_or_load("BRK-B", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
     cached.fetch_or_load("BRK-B", date(2024, 1, 1), date(2024, 6, 30), frequency="daily")
     assert len(fake.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Publication-lag end slack (monthly / quarterly)
+# ---------------------------------------------------------------------------
+
+
+def _seed_raw_cache(
+    tmp_path: Path,
+    *,
+    frequency: str,
+    index: pd.DatetimeIndex,
+    ticker: str = "IR3TIB01AUM156N",
+    source_name: str = "fred",
+) -> CachedSource:
+    store = _make_store(tmp_path)
+    close = np.linspace(100.0, 110.0, len(index), dtype=np.float64)
+    df = pd.DataFrame({"close": close}, index=index)
+    store.write_raw(df, source_name, ticker, frequency)
+    return CachedSource(source=FakeSource(), store=store, source_name=source_name)
+
+
+def test_raw_covers_range_monthly_with_publication_lag(tmp_path: Path) -> None:
+    # Include 2009-12-31 so MIN passes the 5-BDay start slack for Jan 2010 requests.
+    index = pd.date_range("2009-12-31", "2024-11-30", freq="ME", tz="UTC")
+    cached = _seed_raw_cache(tmp_path, frequency="monthly", index=index)
+    assert cached._raw_covers_range(
+        "IR3TIB01AUM156N", "monthly", date(2010, 1, 1), date(2024, 12, 31),
+    )
+
+
+def test_raw_covers_range_monthly_outside_lag_window(tmp_path: Path) -> None:
+    index = pd.date_range("2009-12-31", "2024-09-30", freq="ME", tz="UTC")
+    cached = _seed_raw_cache(tmp_path, frequency="monthly", index=index)
+    assert not cached._raw_covers_range(
+        "IR3TIB01AUM156N", "monthly", date(2010, 1, 1), date(2024, 12, 31),
+    )
+
+
+def test_raw_covers_range_quarterly_with_publication_lag(tmp_path: Path) -> None:
+    index = pd.date_range("2009-12-31", "2024-09-30", freq="QE", tz="UTC")
+    cached = _seed_raw_cache(tmp_path, frequency="quarterly", index=index)
+    assert cached._raw_covers_range(
+        "IR3TIB01AUM156N", "quarterly", date(2010, 1, 1), date(2024, 12, 31),
+    )
+
+
+def test_raw_covers_range_daily_unchanged(tmp_path: Path) -> None:
+    index = pd.bdate_range("2024-01-01", "2024-12-30", tz="UTC")
+    cached = _seed_raw_cache(tmp_path, frequency="daily", index=index)
+    assert cached._raw_covers_range(
+        "IR3TIB01AUM156N", "daily", date(2024, 1, 1), date(2024, 12, 31),
+    )
+
+    index_stale = pd.bdate_range("2024-01-01", "2024-12-20", tz="UTC")
+    cached_stale = _seed_raw_cache(
+        tmp_path, frequency="daily", index=index_stale, ticker="STALE",
+    )
+    assert not cached_stale._raw_covers_range(
+        "STALE", "daily", date(2024, 1, 1), date(2024, 12, 31),
+    )

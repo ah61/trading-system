@@ -49,6 +49,26 @@ from src.exceptions import DataValidationError, StorageError, TradingSystemError
 
 _ADJUSTED_DEFAULT_VERSION = 1
 
+# Publication-lag tolerance per native frequency. The cache is considered
+# to cover [start, end] if the most-recent cached observation is within
+# this many days of `end`. Generous values absorb publication delays
+# (FRED monthly typically prints with ~30-day lag; quarterly even more).
+_PUBLICATION_LAG_DAYS: dict[str, int] = {
+    "daily": 1,
+    "weekly": 7,
+    "monthly": 45,
+    "quarterly": 120,
+}
+
+
+def _publication_lag_days(frequency: str) -> int:
+    """Return the publication-lag tolerance in calendar days for a frequency.
+
+    Unknown frequencies default to 1 day (conservative — strict daily
+    behaviour). Caller is expected to validate frequency upstream.
+    """
+    return _PUBLICATION_LAG_DAYS.get(frequency.lower(), 1)
+
 
 class CacheError(TradingSystemError):
     """Raised on cache invariants violations (e.g. range shrink on overwrite)."""
@@ -217,7 +237,9 @@ class CachedSource:
         # Start: up to 5 business days of slack covers New Year's, MLK Day,
         # Christmas, and other multi-day market closures at year boundaries.
         start_slack = pd.tseries.offsets.BDay(5)
-        end_slack_days = 1
+        # End-side slack: max of tz roundtrip slack (1 day, see comments above)
+        # and publication-lag slack for the requested frequency.
+        end_slack_days = max(1, _publication_lag_days(frequency))
         start_threshold = (pd.Timestamp(required_start) + start_slack).date()
         end_threshold = required_end - pd.Timedelta(days=end_slack_days).to_pytimedelta()
         return cached_start <= start_threshold and cached_end >= end_threshold
