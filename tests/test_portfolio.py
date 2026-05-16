@@ -205,6 +205,36 @@ def test_trades_are_weight_differences() -> None:
     pd.testing.assert_frame_equal(trades, diff)
 
 
+def test_enforce_net_limit_matches_row_reference() -> None:
+    weights = pd.DataFrame(
+        [
+            [0.05, 0.05, -0.02, 0.0],       # net 0.08, within limit
+            [0.07, 0.05, -0.02, 0.0],       # net 0.10, exactly at limit
+            [0.15, 0.05, -0.05, 0.0],       # net 0.15, single-column reduction
+            [0.20, 0.10, 0.05, -0.05],     # net 0.30, multi-column reduction
+            [0.05, 0.03, -0.50, 0.0],       # net -0.42, negative direction
+            [0.0, 0.0, 0.0, 0.0],           # all zeros
+            [-0.20, -0.10, 0.05, 0.0],      # net -0.25, negative reduction
+        ],
+        columns=["a", "b", "c", "d"],
+    )
+    net_limit = 0.10
+
+    ref = weights.copy()
+    for dt in ref.index:
+        ref.loc[dt] = PortfolioConstructor._enforce_net_limit_row(
+            ref.loc[dt], net_limit=net_limit,
+        )
+
+    out = PortfolioConstructor._enforce_net_limit(weights, net_limit=net_limit)
+
+    pd.testing.assert_frame_equal(out, ref, atol=1e-12, rtol=0)
+    assert (out.sum(axis=1).abs() <= net_limit + 1e-12).all()
+    pd.testing.assert_series_equal(out.iloc[0], weights.iloc[0])
+    pd.testing.assert_series_equal(out.iloc[1], weights.iloc[1])
+    pd.testing.assert_series_equal(out.iloc[5], weights.iloc[5])
+
+
 def test_first_row_trades_equal_weights() -> None:
     idx = pd.date_range("2020-01-01", periods=20, freq="D")
     prices = _synthetic_prices(idx)
