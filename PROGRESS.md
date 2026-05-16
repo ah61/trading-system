@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.7 ✅ closed (2026-05-16). Next: small `_resample` anchoring fix, then `backtest_strategy.py` (Phase 6 prerequisite) |
-| **Tests** | 162 passing |
-| **Next action** | Fix `VariableCatalog._resample` anchoring (small, scoped follow-up), then build `scripts/backtest_strategy.py` |
+| **Active milestone** | 5.7 ✅ closed (2026-05-16). `_resample` anchoring fix shipped (2026-05-16). Next: `backtest_strategy.py` (Phase 6 prerequisite) |
+| **Tests** | 165 passing |
+| **Next action** | Design + build `scripts/backtest_strategy.py` |
 
 ---
 
@@ -432,25 +432,33 @@ documenting):**
       and `scripts/evaluate_signals.py` (the existing `--refresh` flag now
       acts on it instead of logging an advisory warning).
 
-Test count: 151 → **162 passing** (verified 2026-05-16).
+Test count: 151 → 162 (deferred close-out) → **165 passing** (resample
+anchoring fix and regression tests added 2026-05-16).
 
-**Known limitation surfaced by deferred-items testing (2026-05-16):**
+**Post-closeout follow-up shipped (2026-05-16):**
 
-`VariableCatalog._resample` builds the forward-filled daily index from
-`series.index.min()` / `series.index.max()` rather than from the caller-
-provided `start` / `end`. Consequence: calling
-`cat.get(monthly_var, frequency='daily', start=2020-01-01, end=2020-12-31)`
-returns an index from 2020-01-31 (first month-end) to the last available
-month-end, NOT 2020-01-01 to 2020-12-31. Days before the first source
-print and after the last one are dropped silently.
+The known limitation surfaced by deferred-items testing — `_resample`
+anchoring on `series.index.min()/max()` instead of the caller-provided
+`start`/`end` — was fixed in commit `6674b24` before starting work on
+`backtest_strategy.py`. Behaviour now:
 
-This is a footgun for any downstream code that passes explicit date ranges
-expecting them to be honored in the output — and `scripts/backtest_strategy.py`
-will absolutely do that. **Filed as a small, scoped follow-up before
-`backtest_strategy.py`** (see "Known Issues / Technical Debt" §
-*Catalogue*). Fix: anchor the forward-fill index on the request range,
-leave leading NaNs before the first source print or raise an explicit
-error on coverage gap.
+- Forward-fill (coarser → finer) output index is anchored on the requested
+  `start`/`end`. A small fetch widening (`_fetch_start_for_ffill`) pulls
+  back one source period so a prior print is available to forward-fill
+  from when the request `start` falls between source prints.
+- If the request `start` is genuinely before the source's first available
+  print (even after widening), `_resample` raises `CatalogError` rather
+  than returning a silently truncated series.
+- Tail extension past the last source print is allowed — that's the point
+  of forward-fill onto a finer grid.
+- Aggregation (finer → coarser) path applies the same head-coverage check.
+
+Three regression tests added (`tests/test_variable_catalog.py`):
+`test_get_forward_fill_anchors_on_requested_range`,
+`test_get_forward_fill_raises_when_request_predates_source`,
+`test_get_forward_fill_extends_past_last_print`. Plus the existing
+`test_get_forward_fills_monthly_to_daily` was tightened to assert full
+requested-range coverage.
 
 **Future milestone placeholder — 5.16 Portfolio layer Series unification
 (LOW PRIORITY):**
@@ -467,19 +475,18 @@ without coercing through a panel).
 
 ### Handoff note for next session
 
-> Milestone 5.7 is now fully closed out (2026-05-16). Stateful-API tests
-> shipped, `force_refresh` plumbed end-to-end. **162 tests passing.**
-> One small known limitation was surfaced and filed: `VariableCatalog._resample`
-> anchors monthly→daily forward-fill on `series.index.min()/max()` instead
-> of the caller's `start`/`end`. Fix before starting `backtest_strategy.py`
-> — Phase 2 will exercise this path with explicit date ranges and would
-> hit the footgun.
+> Milestone 5.7 is fully closed out (2026-05-16). Stateful-API tests
+> shipped, `force_refresh` plumbed end-to-end, and the `_resample`
+> anchoring follow-up that surfaced during testing is also shipped
+> (commit `6674b24`). **165 tests passing.** The catalogue's stateful
+> API is now safe to call with explicit date ranges — `backtest_strategy.py`
+> will rely on this.
 >
-> Next sequence:
-> 1. Small Cursor task: fix `_resample` anchoring + add regression tests.
-> 2. Then build `scripts/backtest_strategy.py` — the Phase 6 prerequisite
->    that exercises `catalogue → engine → portfolio → tearsheet` end to
->    end on real data.
+> Next: design + build `scripts/backtest_strategy.py` — the Phase 6
+> prerequisite that exercises `catalogue → engine → portfolio →
+> tearsheet` end to end on real data. Design conversation first; this
+> is the first time the full pipeline runs through the catalogue on
+> real data and surprises are likely.
 >
 > See PROGRESS.md §5.7 (continued) for the option-A hybrid rationale
 > explaining why the portfolio layer was deliberately not refactored. If
@@ -509,16 +516,14 @@ Phase 7.2 Treasury futures work.
 
 ### Catalogue
 
-- **`VariableCatalog._resample` anchoring footgun (5.7 surfaced 2026-05-16,
-  fix scheduled before `backtest_strategy.py`):** When forward-filling
-  coarser-frequency variables onto a finer index, the output index spans
-  `series.index.min()` to `series.index.max()` of the source data, NOT the
-  caller's `start`/`end`. Days outside the source's actual print range are
-  dropped silently. Affects monthly → daily resampling of FRED rate series,
-  in particular. Fix is local to `_resample`: anchor index on requested
-  `start`/`end`, leave leading NaNs or raise on coverage gap. Add a regression
-  test that calls `cat.get(monthly_var, frequency='daily', start=..., end=...)`
-  and asserts the output index covers the full requested range.
+- **~~`VariableCatalog._resample` anchoring footgun~~ Resolved 2026-05-16
+  (commit `6674b24`).** Forward-fill output now anchors on the caller's
+  `start`/`end`. A small fetch-widening helper (`_fetch_start_for_ffill`)
+  pulls back one source period so a prior print is available when the
+  request `start` falls between source prints. Requests that genuinely
+  predate the source's first print raise `CatalogError` rather than
+  returning silently-truncated data. Three regression tests added; see
+  §5.7 for detail.
 
 ### Code quality / cleanups outstanding
 

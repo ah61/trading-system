@@ -301,15 +301,13 @@ portfolio-layer panel at one explicit boundary (`_assemble_price_panel`) —
       and threaded into the `--refresh` CLI flag in
       `scripts/evaluate_signals.py` (no longer advisory).
 
-Test count: 147 → 151 (signal refactor) → **162** (deferred close-out).
+Test count: 147 → 151 (signal refactor) → 162 (deferred close-out) →
+**165** (resample anchoring fix and regression tests).
 
-**Follow-up before `backtest_strategy.py` starts (filed 2026-05-16):**
-- [ ] Fix `VariableCatalog._resample` anchoring. Forward-fill from coarser
-      to finer frequency currently spans `series.index.min()`/`max()` of
-      the source data, not the caller's `start`/`end`. Anchor on the
-      request range; leave leading NaNs or raise on coverage gap. Add
-      regression test. See PROGRESS.md §"Known Issues / Technical Debt" →
-      Catalogue.
+**Follow-up before `backtest_strategy.py` — shipped 2026-05-16 (commit `6674b24`):**
+- [x] Fix `VariableCatalog._resample` anchoring. Forward-fill now anchors
+      on caller-provided `start`/`end`; requests predating source coverage
+      raise `CatalogError`. Three regression tests added.
 
 ---
 
