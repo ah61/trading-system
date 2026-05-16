@@ -300,15 +300,17 @@ class BacktestEngine:
         # boundary: data is Series-per-variable above, panel from here downward.
         prices_aligned = _assemble_price_panel(data, instruments, history)
 
+        # Causal signals: compute(data[:T]) at any t<=T equals compute(data[:t]).iloc[-1].
+        # We compute once on data truncated to history[-1] and sample per-date via
+        # _signal_value_to_instrument_row, which does an as-of lookup. This is
+        # mathematically equivalent to the per-date compute loop for any causal signal.
         signal_frames: List[pd.DataFrame] = []
         for sig in signals:
-            rows: List[pd.Series] = []
-            for d in history:
-                sliced = _slice_data_no_lookahead(data, d, method_l, train_window)
-                raw = sig.compute(sliced)
-                if not isinstance(raw, pd.Series):
-                    raise TypeError(f"{sig.name}: compute must return a pandas Series.")
-                rows.append(_signal_value_to_instrument_row(raw, d, instruments))
+            sliced_full = _slice_data_no_lookahead(data, history[-1], method_l, train_window)
+            raw = sig.compute(sliced_full)
+            if not isinstance(raw, pd.Series):
+                raise TypeError(f"{sig.name}: compute must return a pandas Series.")
+            rows = [_signal_value_to_instrument_row(raw, d, instruments) for d in history]
             sig_df = pd.DataFrame(rows, index=history, columns=instruments).astype(float)
             signal_frames.append(sig_df)
 

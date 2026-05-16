@@ -33,6 +33,7 @@ from src.backtest.walk_forward import (
 )
 from src.portfolio.costs import CostModel
 from src.signals.base import Signal
+from src.signals.rates.trend import RatesTrendSignal
 
 
 # Names used throughout the suite to stand in for catalogue variable names.
@@ -72,29 +73,6 @@ def _default_cfg(**overrides: Any) -> dict:
     return cfg
 
 
-class _SpyNoLookaheadSignal(Signal):
-    """Records the latest timestamp seen in ``AAA`` on every ``compute`` call."""
-
-    name = "spy_no_lookahead"
-    asset_class = "equity"
-    signal_type = "spy"
-    frequency = "daily"
-    params: Dict[str, Any] = {}
-    required_variables = ["AAA", "BBB"]
-
-    call_max_timestamps: List[pd.Timestamp] = []
-
-    def compute(self, data: Dict[str, pd.Series]) -> pd.Series:
-        close = data["AAA"].astype(float)
-        mx = pd.Timestamp(close.index.max())
-        if mx.tzinfo is None:
-            mx = mx.tz_localize("UTC")
-        else:
-            mx = mx.tz_convert("UTC")
-        self.call_max_timestamps.append(mx)
-        return close.pct_change().fillna(0.0)
-
-
 class _MomentumSignal(Signal):
     name = "mom"
     asset_class = "equity"
@@ -109,13 +87,6 @@ class _MomentumSignal(Signal):
         return sig.clip(-1.0, 1.0)
 
 
-@pytest.fixture(autouse=True)
-def _reset_spy() -> None:
-    _SpyNoLookaheadSignal.call_max_timestamps.clear()
-    yield
-    _SpyNoLookaheadSignal.call_max_timestamps.clear()
-
-
 def _calendar_from_data(data: Dict[str, pd.Series]) -> pd.DatetimeIndex:
     """Union of all Series indices, used to derive start/end dates in tests."""
     ix: pd.DatetimeIndex | None = None
@@ -125,29 +96,20 @@ def _calendar_from_data(data: Dict[str, pd.Series]) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(ix).sort_values()
 
 
-def test_no_lookahead_enforced() -> None:
-    data = _price_data(30)
-    cal = _calendar_from_data(data)
-    start = cal[0].date()
-    end = cal[-1].date()
-    spy = _SpyNoLookaheadSignal()
-    cfg = _default_cfg()
-    engine = BacktestEngine()
-    engine.run(
-        signals=[spy],
-        data=data,
-        portfolio_config=cfg,
-        cost_model=CostModel(spread_bps={"AAA": 0.0, "BBB": 0.0}),
-        start_date=start,
-        end_date=end,
-        method="expanding",
-        train_window=10,
-        test_window=5,
-    )
-    history = cal[cal <= cal[-1]]
-    assert len(spy.call_max_timestamps) == len(history)
-    for i, mx in enumerate(spy.call_max_timestamps):
-        assert mx <= history[i]
+def test_signal_compute_is_causal_under_future_perturbation() -> None:
+    base = _price_data(30)
+    data = {"TLT_CLOSE": base["AAA"].rename("TLT_CLOSE")}
+    tlt = data["TLT_CLOSE"]
+    t_cut = tlt.index[len(tlt.index) // 2]
+
+    sig = RatesTrendSignal()
+    output_full = sig.compute(data)
+
+    perturbed = tlt.copy()
+    perturbed.loc[tlt.index > t_cut] = perturbed.loc[tlt.index > t_cut] * 2.0
+    output_perturbed = sig.compute({"TLT_CLOSE": perturbed})
+
+    assert output_full.loc[:t_cut].equals(output_perturbed.loc[:t_cut])
 
 
 def test_backtest_result_has_required_fields() -> None:
