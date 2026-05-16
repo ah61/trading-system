@@ -2,7 +2,7 @@
 # Build Log and Current Status
 
 **Last Updated:** 2026-05-16
-**Tracks ROADMAP.md version:** 0.5
+**Tracks ROADMAP.md version:** 0.6
 
 ---
 
@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.7 ✅ closed (2026-05-16). `_resample` anchoring fix shipped (2026-05-16). Next: `backtest_strategy.py` (Phase 6 prerequisite) |
-| **Tests** | 165 passing |
-| **Next action** | Design + build `scripts/backtest_strategy.py` |
+| **Active milestone** | 5.7 ✅ closed (2026-05-16). `_resample` fix shipped. `scripts/backtest_strategy.py` shipped (Phase 6 prerequisite met). |
+| **Tests** | 166 passing |
+| **Next action** | Open question: vectorise/cache the engine signal recompute (current backtest takes ~4.5 min per run; not blocking, but compounds when adding walk-forward modes and multiple signals). Or proceed to Milestone 5.8 (Transformation Pipeline) per ROADMAP order. |
 
 ---
 
@@ -248,7 +248,7 @@ restructured. Documented in `DESIGN_DECISIONS.md`. New milestone list:
 | # | Milestone | Status |
 |---|---|---|
 | 5.6 | Output Container + Reporting Hygiene | ✅ complete |
-| 5.7 | Variable Catalogue: stateful lookup | ✅ complete (deferred test/refresh items remain) |
+| 5.7 | Variable Catalogue: stateful lookup | ✅ complete |
 | 5.8 | Transformation Pipeline + Derived Variable Persistence | ⬜ |
 | 5.9 | FX Carry Quarterly Horizon Experiment | ⬜ |
 | 5.10 | Universe Expansion (FX EM, equities, rates) | ⬜ |
@@ -496,6 +496,64 @@ without coercing through a panel).
 
 ---
 
+### Phase 6 prerequisite — `scripts/backtest_strategy.py` ✅ (2026-05-16)
+
+The end-to-end driver flagged as a gap in §5.7 ("catalogue → engine →
+portfolio → tearsheet has unit-test coverage but no real-data driver").
+Shipped commit `3095fc0`.
+
+**What's in:**
+- `scripts/backtest_strategy.py` — full driver. CLI mirrors
+  `evaluate_signals.py`: `--signal`, `--start`, `--end`,
+  `--method {expanding,rolling}`, `--refresh`, `--no-tearsheet`.
+  Public `run_backtest(args, *, catalog=None, reports_root=None)`
+  function with injection hooks for testing.
+- `tests/test_backtest_strategy.py` — one smoke test using synthetic
+  stub catalogue (~6 years synthetic data to satisfy the engine's
+  default 5y train + 1y test windows). Runs end-to-end in ~100s, asserts
+  `Run` object created with `manifest.json`, `results.md`, and correct
+  config capture.
+
+**Real-data verification (Rates Trend on TLT, 2010-2024):**
+- Pipeline ran first try, no errors.
+- `OutputManager.new_strategy()` correctly routed to
+  `reports/strategies/{ts}_rates_trend_expanding/`.
+- Manifest captured git commit (`a50caa8`), git_dirty flag, config, run_id,
+  timestamp.
+- BacktestResult: Sharpe -0.55, max DD -3.31%, hit rate 49.2%, 252 OOS
+  periods. **Matches the historical Phase 4 validation number
+  (-0.52 OOS).** The 5.7 wiring change preserved numerics. This is the
+  most important result: the engine boundary refactor is correct.
+- Six-panel tearsheet renders cleanly.
+
+**Tests: 165 → 166.**
+
+**Limitations surfaced by this run — filed for follow-up:**
+
+1. **Engine signal-recompute cost.** Single-signal single-instrument
+   backtest over 2010-2024 takes ~4.5 minutes. Root cause: the engine
+   loops `signal.compute(sliced_data)` for every calendar day in the
+   OOS history (~252 calls per test window). Compounds badly with
+   walk-forward modes and multiple signals. Fix: vectorise inside the
+   engine, or restrict recompute to actual `test_dates`. Engine concern,
+   not script. See "Known Issues" below.
+2. **Default walk-forward windows produce only one OOS year.** Default
+   `train_window=252*5`, `test_window=252` means one walk-forward window
+   over 2010-2024 covers 2024 only. Future runs may want shorter train
+   or rolling mode for richer OOS coverage. Not a bug — design choice
+   visible now that it has consequences. Document, don't fix.
+3. **Rolling-Sharpe tearsheet panel needs ≥2× window of data.** With
+   only 252 test periods and a 252-day window, the panel is almost
+   entirely warm-up. Tearsheet improvement: skip or warn when test
+   history < 2× window. See "Known Issues" below.
+4. **`PORTFOLIO_BY_SIGNAL` registry only has `rates_trend`.** `fx_carry`
+   and `equity_momentum` are listed in `--signal` choices for
+   discoverability but raise a clear `ValueError` if invoked
+   (`Signal 'X' has no class registered. Available: ['rates_trend']`).
+   Wire them when needed.
+
+---
+
 ### IB account setup ✅ (2026-05-14)
 
 Prerequisites for Milestone 5.12 completed:
@@ -524,6 +582,26 @@ Phase 7.2 Treasury futures work.
   predate the source's first print raise `CatalogError` rather than
   returning silently-truncated data. Three regression tests added; see
   §5.7 for detail.
+
+### Engine
+
+- **Signal recompute is O(calendar) per backtest run (surfaced 2026-05-16
+  via `backtest_strategy.py` real-data run).** `BacktestEngine.run` loops
+  `signal.compute(sliced_data)` for every calendar day in OOS history.
+  For Rates Trend on TLT 2010-2024 with default windows (5y train,
+  1y test) this is ~252 compute calls and ~4.5 min wall time. Compounds
+  with walk-forward modes and multiple signals. Fix scope: vectorise
+  inside the engine, or restrict recompute to `test_dates` only. Not
+  blocking the current Phase 5 work, but should be addressed before
+  parameter sweeps or multi-signal portfolios.
+
+### Reporting
+
+- **`TearsheetGenerator` rolling-Sharpe panel needs ≥2× window of test
+  history (surfaced 2026-05-16).** With one walk-forward window (252
+  OOS days) and the default 252-day rolling window, the rolling-Sharpe
+  panel is almost entirely warm-up artefact. Cosmetic. Fix: skip the
+  panel or use a shorter window when test history < 2× nominal window.
 
 ### Code quality / cleanups outstanding
 

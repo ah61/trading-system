@@ -1,7 +1,7 @@
 # ROADMAP.md
 # Build Phases and Completion Criteria
 
-**Version:** 0.5
+**Version:** 0.6
 **Last Updated:** 2026-05-16
 **Rule:** Do not begin a phase until all completion criteria for the previous phase are met.
 Completion means: tests pass, data contracts are verified, and the module has been
@@ -531,12 +531,13 @@ without coercing through a panel.
 - IDEALPRO FX subscription active ✅ (2026-05-14)
 - IBSource module built in Milestone 5.12 (FX historical/real-time)
 - Market-convention FX label translation layer (per DESIGN_DECISIONS.md DD-005)
-- **End-to-end backtest driver** — `scripts/backtest_strategy.py` mirroring
-  the structure of `scripts/evaluate_signals.py` but calling
-  `BacktestEngine.run` (or `WalkForwardEngine.run`). 5.7 finding: the
-  `catalogue → engine → portfolio` path has unit-test coverage but no
-  end-to-end runner. Tests passing ≠ system runs end to end. This script is
-  what proves the full pipeline works on real data before any paper trading.
+- **End-to-end backtest driver** ✅ `scripts/backtest_strategy.py` shipped
+  2026-05-16 (commit `3095fc0`). Mirrors `scripts/evaluate_signals.py`
+  structure; calls `BacktestEngine.run`. Real-data verification on Rates
+  Trend / TLT 2010-2024 produced Sharpe -0.55 matching the historical
+  Phase 4 validation number — the 5.7 wiring change preserved numerics.
+  See PROGRESS.md "Phase 6 prerequisite — `scripts/backtest_strategy.py`"
+  for full detail and surfaced limitations.
 
 ### Milestone 6.1 — IBSource Live Feed Extension
 **Builds on:** Milestone 5.12 `IBSource` (which covers FX historical).
