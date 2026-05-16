@@ -1,8 +1,8 @@
 # PROGRESS.md
 # Build Log and Current Status
 
-**Last Updated:** 2026-05-15
-**Tracks ROADMAP.md version:** 0.2
+**Last Updated:** 2026-05-16
+**Tracks ROADMAP.md version:** 0.5
 
 ---
 
@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.7 — Variable Catalogue (complete; deferred test/refresh items remain) |
-| **Tests** | 151 passing |
-| **Next action** | Write `scripts/backtest_strategy.py` (Phase 6 prerequisite) — see handoff note below |
+| **Active milestone** | 5.7 ✅ closed (2026-05-16). Next: small `_resample` anchoring fix, then `backtest_strategy.py` (Phase 6 prerequisite) |
+| **Tests** | 162 passing |
+| **Next action** | Fix `VariableCatalog._resample` anchoring (small, scoped follow-up), then build `scripts/backtest_strategy.py` |
 
 ---
 
@@ -406,11 +406,11 @@ Phase 6 prerequisite.
 **Known limitations introduced by this refactor (not bugs, but worth
 documenting):**
 
-- **`scripts/evaluate_signals.py --refresh` is advisory.** The catalogue's
-  `get()` doesn't expose `force_refresh`. To force a refresh, delete
-  `data/raw/raw.duckdb` before running. Cleanest follow-up: add
-  `force_refresh: bool = False` to `VariableCatalog.get()` and thread it
-  through.
+- **~~`scripts/evaluate_signals.py --refresh` is advisory.~~** **Resolved
+  2026-05-16.** `force_refresh: bool = False` added to `VariableCatalog.get()`
+  and threaded through `CachedSource.fetch_or_load`. `--refresh` now actually
+  forces a re-fetch via `force_refresh=args.refresh` at every `catalog.get(...)`
+  call site in the runner.
 - **Engine prices the portfolio off the first instrument.** Pre-5.7 behaviour
   was identical: the engine used a single-column reference (either the
   `"close"` column if it existed, else the first column). The post-5.7 engine
@@ -422,14 +422,35 @@ documenting):**
 - **FX pair labels are mechanical (`<non-USD>/USD`)** — see DD-005.
   Display-layer translation is a Phase 6 prerequisite. Unchanged from before.
 
-**Deferred items from the original 5.7 list:**
+**Deferred items from the original 5.7 list — closed out 2026-05-16:**
 
-- [ ] New tests for the catalogue stateful API (`tests/test_variable_catalog.py`):
+- [x] New tests for the catalogue stateful API (`tests/test_variable_catalog.py`):
       catalogue.get returning Series, universe expansion producing per-ticker
-      specs, resampling on `get()`. These test the catalogue itself, not the
-      signals; not in this session's scope.
-- [ ] `force_refresh: bool` plumbed through `VariableCatalog.get()` and the
-      runner.
+      specs, resampling on `get()`, force_refresh cache bypass. 11 new tests
+      added (14 → 25 in this file).
+- [x] `force_refresh: bool = False` plumbed through `VariableCatalog.get()`
+      and `scripts/evaluate_signals.py` (the existing `--refresh` flag now
+      acts on it instead of logging an advisory warning).
+
+Test count: 151 → **162 passing** (verified 2026-05-16).
+
+**Known limitation surfaced by deferred-items testing (2026-05-16):**
+
+`VariableCatalog._resample` builds the forward-filled daily index from
+`series.index.min()` / `series.index.max()` rather than from the caller-
+provided `start` / `end`. Consequence: calling
+`cat.get(monthly_var, frequency='daily', start=2020-01-01, end=2020-12-31)`
+returns an index from 2020-01-31 (first month-end) to the last available
+month-end, NOT 2020-01-01 to 2020-12-31. Days before the first source
+print and after the last one are dropped silently.
+
+This is a footgun for any downstream code that passes explicit date ranges
+expecting them to be honored in the output — and `scripts/backtest_strategy.py`
+will absolutely do that. **Filed as a small, scoped follow-up before
+`backtest_strategy.py`** (see "Known Issues / Technical Debt" §
+*Catalogue*). Fix: anchor the forward-fill index on the request range,
+leave leading NaNs before the first source print or raise an explicit
+error on coverage gap.
 
 **Future milestone placeholder — 5.16 Portfolio layer Series unification
 (LOW PRIORITY):**
@@ -446,23 +467,25 @@ without coercing through a panel).
 
 ### Handoff note for next session
 
-> Milestone 5.7 is now complete. Signal-interface change + engine boundary
-> refactor both shipped. **151 tests passing** (verified 2026-05-15). The
-> `evaluate_signals.py` runner uses the catalogue end-to-end and is verified.
-> The `catalogue → engine → portfolio` path is **not** end-to-end verified —
-> there is no script yet that drives a full backtest from the catalogue.
-> Write `scripts/backtest_strategy.py` before paper trading.
+> Milestone 5.7 is now fully closed out (2026-05-16). Stateful-API tests
+> shipped, `force_refresh` plumbed end-to-end. **162 tests passing.**
+> One small known limitation was surfaced and filed: `VariableCatalog._resample`
+> anchors monthly→daily forward-fill on `series.index.min()/max()` instead
+> of the caller's `start`/`end`. Fix before starting `backtest_strategy.py`
+> — Phase 2 will exercise this path with explicit date ranges and would
+> hit the footgun.
 >
-> Still deferred from 5.7: catalogue stateful-API tests
-> (`tests/test_variable_catalog.py`) and `force_refresh` plumbing through
-> `VariableCatalog.get()`. Both are small, isolated, and can be done in any
-> order.
+> Next sequence:
+> 1. Small Cursor task: fix `_resample` anchoring + add regression tests.
+> 2. Then build `scripts/backtest_strategy.py` — the Phase 6 prerequisite
+>    that exercises `catalogue → engine → portfolio → tearsheet` end to
+>    end on real data.
 >
 > See PROGRESS.md §5.7 (continued) for the option-A hybrid rationale
-> explaining why the portfolio layer was deliberately not refactored. If you
-> ever want full Series-throughout uniformity, that's milestone 5.16
-> placeholder — but read the rationale first; it explains why I'd push back
-> on doing it speculatively.
+> explaining why the portfolio layer was deliberately not refactored. If
+> you ever want full Series-throughout uniformity, that's milestone 5.16
+> placeholder — but read the rationale first; it explains why I'd push
+> back on doing it speculatively.
 
 ---
 
@@ -483,6 +506,19 @@ Phase 7.2 Treasury futures work.
 ---
 
 ## Known Issues / Technical Debt
+
+### Catalogue
+
+- **`VariableCatalog._resample` anchoring footgun (5.7 surfaced 2026-05-16,
+  fix scheduled before `backtest_strategy.py`):** When forward-filling
+  coarser-frequency variables onto a finer index, the output index spans
+  `series.index.min()` to `series.index.max()` of the source data, NOT the
+  caller's `start`/`end`. Days outside the source's actual print range are
+  dropped silently. Affects monthly → daily resampling of FRED rate series,
+  in particular. Fix is local to `_resample`: anchor index on requested
+  `start`/`end`, leave leading NaNs or raise on coverage gap. Add a regression
+  test that calls `cat.get(monthly_var, frequency='daily', start=..., end=...)`
+  and asserts the output index covers the full requested range.
 
 ### Code quality / cleanups outstanding
 

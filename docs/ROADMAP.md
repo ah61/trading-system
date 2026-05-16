@@ -1,8 +1,8 @@
 # ROADMAP.md
 # Build Phases and Completion Criteria
 
-**Version:** 0.4
-**Last Updated:** 2026-05-15
+**Version:** 0.5
+**Last Updated:** 2026-05-16
 **Rule:** Do not begin a phase until all completion criteria for the previous phase are met.
 Completion means: tests pass, data contracts are verified, and the module has been
 reviewed in Claude.ai against ARCHITECTURE.md.
@@ -278,7 +278,9 @@ CONVENTIONS.md §8 for details.
 **Goal:** Make the `VariableCatalog` (5.3 registry) actually serve data, not
 just declare it. Cache-first lookup with transformation support.
 
-**Completed 2026-05-15** (in two checkpoints, see PROGRESS.md §5.7).
+**Completed 2026-05-15** (catalogue + signal interface + engine boundary, in
+two checkpoints). **Deferred items closed out 2026-05-16.** See PROGRESS.md
+§5.7 for full detail.
 
 Catalogue promoted from stateless registry to stateful runtime object holding
 DataStore + sources. `catalogue.get(name, frequency, start, end) -> pd.Series`
@@ -287,15 +289,27 @@ returns variables with cache-first lookup. Template-based universe expansion
 `Dict[str, pd.Series]` keyed by catalogue variable name (DD-007). Backtest
 engine accepts the Series contract on its public API and translates to the
 portfolio-layer panel at one explicit boundary (`_assemble_price_panel`) —
-"option A hybrid" per DD-009. 4 new signal tests (147 → 151 passing).
+"option A hybrid" per DD-009.
 
-**Deferred (small, isolated, not blocking — pick up when convenient):**
-- [ ] `tests/test_variable_catalog.py` additions for the stateful API:
-      catalogue.get returning Series at native frequency, resampling on
-      `get()`, universe expansion producing per-ticker specs.
-- [ ] `force_refresh: bool` plumbed through `VariableCatalog.get()` and the
-      `--refresh` CLI flag in `scripts/evaluate_signals.py` (currently
-      advisory — to force a refresh, delete `data/raw/raw.duckdb`).
+**Deferred items closed out 2026-05-16:**
+- [x] `tests/test_variable_catalog.py` additions for the stateful API: 11 new
+      tests covering `get()` returning Series, native vs resampled frequency,
+      registry-only error, transformed-variable deferral (5.8 pin), universe
+      expansion end-to-end, and `force_refresh` cache bypass (14 → 25 tests
+      in this file).
+- [x] `force_refresh: bool = False` plumbed through `VariableCatalog.get()`
+      and threaded into the `--refresh` CLI flag in
+      `scripts/evaluate_signals.py` (no longer advisory).
+
+Test count: 147 → 151 (signal refactor) → **162** (deferred close-out).
+
+**Follow-up before `backtest_strategy.py` starts (filed 2026-05-16):**
+- [ ] Fix `VariableCatalog._resample` anchoring. Forward-fill from coarser
+      to finer frequency currently spans `series.index.min()`/`max()` of
+      the source data, not the caller's `start`/`end`. Anchor on the
+      request range; leave leading NaNs or raise on coverage gap. Add
+      regression test. See PROGRESS.md §"Known Issues / Technical Debt" →
+      Catalogue.
 
 ---
 
