@@ -57,6 +57,26 @@ HYG_CLOSE:
   instrument_type: etf
   adjustment: auto_adjust
 
+TIP_CLOSE:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: TIP
+  description: iShares TIPS Bond ETF close (auto-adjusted)
+  frequency: daily
+  instrument_type: etf
+  adjustment: auto_adjust
+
+LQD_CLOSE:
+  domain: market
+  layer: raw
+  source: yahoo
+  ticker: LQD
+  description: iShares iBoxx $ Investment Grade Corporate Bond ETF close (auto-adjusted)
+  frequency: daily
+  instrument_type: etf
+  adjustment: auto_adjust
+
 # FX spot pairs (used for FX Carry signal evaluation).
 EURUSD:
   domain: market
