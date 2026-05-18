@@ -1,8 +1,8 @@
 # DESIGN_DECISIONS.md
 # Design Rationale and Open Questions
 
-**Version:** 0.2
-**Last Updated:** 2026-05-15
+**Version:** 0.3
+**Last Updated:** 2026-05-16
 **Status:** Living document — append decisions, do not rewrite history.
 
 ---
@@ -406,99 +406,219 @@ change.
 
 ---
 
-## DD-009 — Backtest engine boundary: hybrid Series/panel contract
+## DD-009 — SignalEvaluator takes prices, computes returns internally
 **Date:** 2026-05-15
-**Status:** Decided (locks 5.7 engine refactor)
+**Status:** Decided and shipped (commit ad41103)
 
 ### Context
-Milestone 5.7 changed the signal layer contract to `Dict[str, pd.Series]` keyed
-by catalogue variable name (per DD-006 catalogue stateful design and DD-007
-naming). The natural follow-on question: should the *entire* downstream
-pipeline (portfolio sizing, construction, costs, results) also be rewritten to
-consume `Dict[str, pd.Series]`, or should the new contract stop at the engine
-boundary while the portfolio layer keeps its existing wide-DataFrame panel?
+Pre-DD-009, the runner constructed forward returns per signal in three
+bespoke helpers (`rates_trend_forward_returns`, `fx_carry_forward_returns`,
+`equity_momentum_forward_returns`) and passed log-return Series to
+`SignalEvaluator.evaluate(signal=..., forward_returns=...)`. The FX
+helper had special logic for USDXXX-orientation spots (negate the log
+return for CAD/USD, JPY/USD, CHF/USD). Two problems:
 
-Two candidate refactors were on the table:
-
-- **Option A — Hybrid.** Engine's public API accepts `Dict[str, pd.Series]`.
-  Inside the engine, just before the handoff to `PortfolioConstructor.construct`,
-  the engine assembles a wide DataFrame panel (rows = dates, columns =
-  instruments) from the dict. The portfolio layer is unchanged.
-- **Option B — Series throughout.** Rewrite `PositionSizer.volatility_target`,
-  `PositionSizer.risk_parity`, `PortfolioConstructor.construct`, and the
-  `CostModel.apply_costs` call paths to consume `Dict[str, pd.Series]` directly.
-  No panel anywhere in the codebase.
+- The "compute forward returns from prices" step was duplicated three
+  times with subtle per-signal variations. Adding a new signal meant
+  writing another helper or copy-pasting and tweaking.
+- The FX inversion lived in the runner, not the signal. The signal
+  produced mechanical pair labels (DD-005) but the runner had to know
+  about FRED/Yahoo orientation conventions to invert correctly.
 
 ### Decision
-**Option A — hybrid.** Engine accepts Series on its public API and assembles
-the panel internally at one explicit boundary (`BacktestEngine._assemble_price_panel`).
-The portfolio layer continues to consume the wide DataFrame panel.
-
-Knock-on changes that landed with this decision:
-- `portfolio_config["prices_key"]` removed in favour of
-  `portfolio_config["instruments"]` (explicit list of catalogue variable names
-  representing tradeable instruments). The engine uses this list to drive the
-  panel assembly.
-- `_assemble_price_panel` is the single function that bridges the two shapes,
-  with an explicit comment marking it as the contract boundary.
+`SignalEvaluator.evaluate(signal, prices, horizon, frequency, *,
+forward_returns_fn=None)` takes **prices** as its second positional and
+computes 1-period log returns internally (`log(p / p.shift(1))` per
+asset for MultiIndex inputs, plain log diff for single-asset). Custom
+return constructions remain available via the `forward_returns_fn`
+keyword (a callable, not a Series).
 
 ### Rationale
-**Why not Option B (Series throughout):**
+- Single point of truth for the price→returns transform. CONVENTIONS §3.2
+  already says "use log returns for statistics"; the evaluator now
+  enforces it rather than trusting each helper to do it the same way.
+- Eliminates the "runner builds returns, evaluator resamples returns"
+  awkwardness — prices are the natural input at the price-to-return
+  boundary.
+- Sets up DD-010: signals can hand the evaluator prices via a uniform
+  `instrument_prices()` method without each signal having to know how
+  to compute returns.
 
-1. **Cross-sectional math is naturally panel-shaped.** Vol targeting and risk
-   parity compute things like "the covariance matrix of the cross-section of
-   instruments" or "the inverse-vol weights across all instruments today." Those
-   operations are one-liners on a DataFrame panel and a multi-line loop on a
-   dict of Series. Rewriting them costs lines, adds bugs, and improves nothing.
-2. **Internal panel rebuild is zero-benefit ceremony.** If the portfolio layer
-   accepts Series but then rebuilds a panel internally on every call, we have
-   all the cost of the refactor and none of the benefit. The shape difference
-   is real; pretending it isn't just moves the bridge code.
-3. **The 5.7 contract is about signal-author ergonomics.** The point of the
-   Series dict is that *signal authors* shouldn't think about wide panels of
-   irrelevant instruments — they declare exactly the variables they consume
-   by name. Portfolio code doesn't have that property: it operates on the full
-   cross-section by definition. The two layers have legitimately different
-   shape needs.
-4. **Working code is more valuable than uniform code.** The portfolio layer
-   has tests and works. A speculative rewrite churns code that isn't broken,
-   in service of a uniformity that doesn't pay off downstream.
-
-**Why not skip the engine refactor entirely (keep the old contract):**
-
-The signal layer had to change for 5.7 (catalogue contract). With the signal
-layer on Series, the engine had to translate *somewhere* — either at the
-boundary into the engine (option A) or buried in every signal's compute()
-call (the worst of both worlds). Putting the translation at one named function
-keeps the bridge code findable and the rest of the engine clean.
-
-### What's explicitly NOT decided here
-- Whether the portfolio layer will *ever* move to Series. Reserved as Milestone
-  5.16 (placeholder). Not scheduled, not promised, low priority. Do not do
-  speculatively. Wait for a concrete need — e.g., a signal whose forward returns
-  are per-variable and the engine has to consume them without coercing through
-  a panel.
-
-### Cross-references
-- **ARCHITECTURE.md §5** — the formal data contract specifications, including
-  the "Engine ↔ Portfolio internal boundary" subsection that names
-  `_assemble_price_panel`.
-- **CONVENTIONS.md §3.6** — the layer-by-layer data shape rule for new code.
-- **PROGRESS.md §5.7 (continued)** — the implementation record and the
-  "Deliberately NOT changed" rationale block for the portfolio layer.
-- **ROADMAP.md Milestone 5.16** — the placeholder for the (not scheduled)
-  Series-throughout refactor.
+### Implementation note (incomplete migration caught later)
+DD-009 was applied to the evaluator in commit `ad41103` but the runner
+was not migrated in the same commit. The runner continued to call
+`evaluate(signal=..., forward_returns=...)` until DD-010 landed, which
+broke every smoke-test invocation in between. The gap was not caught
+because no one re-ran the smoke test before the handoff that claimed
+"smoke test runs in ~6s." This is the motivating example for DD-011.
 
 ### Open items
-- Engine currently prices the portfolio off the first instrument in the
-  `instruments` list. This was the pre-5.7 behaviour (single-column reference)
-  and is preserved by 5.7, not introduced by it. Multi-instrument portfolio
-  returns weighted per-instrument is a future refactor; not blocked on the
-  Series question.
+None — superseded by DD-010 for the runner-side consumption pattern.
 
 ---
 
-# Open Questions
+## DD-010 — Signal owns instruments and instrument prices
+**Date:** 2026-05-16
+**Status:** Decided and shipped (commit ff92ff4)
+
+### Context
+After DD-009, "what does this signal trade?" still had two answers in
+the codebase:
+
+- The **runner** had per-signal `*_forward_returns()` helpers and the
+  `FX_PAIR_TO_SPOT_VARIABLE` dict, encoding which catalogue variables
+  produce returns for which signal and how to handle FX orientation.
+- The **engine** read `portfolio_config['instruments']` — a hand-authored
+  list passed alongside the signal at backtest time.
+
+Both lists were authored by hand and could drift. Adding a new signal
+meant updating two places consistently.
+
+### Decision
+The `Signal` base class owns the answer via three new attributes/methods:
+
+- `instruments: list[str]` — catalogue variable names representing the
+  tradeable instruments the signal expresses positions over. May be
+  identical to, disjoint from, or overlapping with `required_variables`;
+  the signal decides based on semantics.
+- `evaluation_horizons: list[int]` — horizons (in periods of the
+  signal's `frequency`) at which the signal is evaluated. Class
+  attribute, hardcoded by the subclass. Not loaded from YAML.
+- `instrument_prices(data: Dict[str, pd.Series]) -> pd.Series` —
+  returns prices indexed compatibly with the signal output's asset
+  axis (plain DatetimeIndex for single-asset; MultiIndex (date, asset)
+  for cross-sectional). Default packs `self.instruments` from `data`;
+  subclasses override when the mapping needs transformation (e.g. FX
+  Carry inverts USDXXX-orientation spots).
+
+Both the runner and the engine now read from the signal:
+
+- Runner: a single generic `evaluate_signal()` fetches
+  `signal.required_variables` and `signal.instruments` from the
+  catalogue, calls `signal.compute()` and `signal.instrument_prices()`,
+  and loops over `signal.evaluation_horizons` calling
+  `SignalEvaluator.evaluate(prices=...)` per the DD-009 contract.
+- Engine: reads `signal.instruments` and rejects any
+  `portfolio_config['instruments']` key with `ValueError`. No
+  backward-compat fallback.
+
+The disjointness contract is documented on the base class and
+explicitly tested:
+- Single-asset signals (Rates Trend): identical.
+- Cross-sectional factor signals computed from prices (Equity
+  Momentum): identical.
+- Cross-sectional signals computed from one variable set and traded
+  on another (FX Carry: rates in, FX out): disjoint.
+
+### Rationale
+- Single source of truth eliminates drift between runner and engine.
+- Adding a new signal is now one class with the three attributes and
+  optional `instrument_prices` override; no runner edits, no engine
+  config edits.
+- `evaluation_horizons` is a class attribute on purpose: horizons are
+  signal semantics, not configuration to be tuned. Putting them in YAML
+  invites someone to fiddle for a "better number" — the DSR/PBO problem
+  we already correct for elsewhere.
+- The FX Carry 1/p price inversion is mathematically equivalent to the
+  pre-DD-010 -r return negation (`log(1/p_t / 1/p_{t-1}) =
+  -log(p_t/p_{t-1})`), so numeric identity is preserved at the period-
+  sum level. Confirmed empirically against Rates Trend and Equity
+  Momentum (byte-identical to baseline); FX Carry produces working
+  numbers consistent with PROGRESS.md's post-5.5 results.
+
+### Implementation note (one-line follow-up fix)
+The original DD-010 design prescribed fetching `signal.required_variables`
+at `signal.frequency` and `signal.instruments` at `"daily"`. This produced
+N=0 metrics for FX Carry because the signal output ended up indexed on
+month-start dates that couldn't join with daily price dates. Fixed in
+commit `b1e0ab3`: fetch **both** at daily and let the catalogue's
+forward-fill (DD-004) handle frequency mismatches inside `get()`. The
+signal's `compute()` consumes daily-indexed (forward-filled) rate series,
+produces a daily-indexed signal, and aligns naturally with daily prices.
+The evaluator's frequency layer resamples both together to
+`signal.frequency`.
+
+This is the correct pattern: **the catalogue is the right place to
+handle frequency mismatches via forward-fill** (DD-004 honest-frequency
+policy). Signal compute consumes daily everywhere. The evaluator handles
+target-frequency resampling.
+
+### Open items
+- The "compute on daily forward-filled inputs" pattern needs to be
+  documented in CONVENTIONS or ARCHITECTURE as a convention, not just a
+  bug fix.
+- Equity Momentum CatalogError on first-business-day-of-year edge:
+  surfaced during DD-010 smoke testing, masked on subsequent runs by
+  cache. Tracked in PROGRESS.md Known Issues.
+
+---
+
+## DD-011 — Handoff verification protocol
+**Date:** 2026-05-16
+**Status:** Decided
+
+### Context
+Two recent sessions opened with handoff notes describing the previous
+session's state, and in both cases the description was wrong about a
+load-bearing detail:
+
+1. The DD-009 handoff claimed "203 tests passing, smoke test runs in
+   ~6s." Tests passed but the smoke test had been broken for the entire
+   commit window — the runner was calling `evaluate(signal=...,
+   forward_returns=...)` against an evaluator that no longer accepted
+   that kwarg. The gap was caught only by grepping the runner during
+   DD-010 planning, costing a sub-session of investigation and forcing
+   DD-010 to absorb a DD-009 runner-fix it shouldn't have needed to.
+
+2. The DD-010 prompt was drafted on the implicit assumption that the
+   runner worked. It didn't, and an entire "two fetches at two
+   frequencies" architectural decision was made on a faulty premise
+   (corrected in the b1e0ab3 follow-up).
+
+Both failures share a root cause: handoff notes describe **intent**
+("smoke test runs in ~6s") rather than **verified state** (the actual
+stdout of the smoke test as of the last commit). No one re-ran the
+canonical verification before handing off.
+
+### Decision
+Every session-ending handoff must include the actual stdout (or final
+output snippet, truncated to ~20 lines) of the project's canonical
+end-to-end verification. For this project that is currently:
+
+    .\.venv\Scripts\python.exe scripts\evaluate_signals.py --no-report
+
+The handoff note **must** record:
+- Whether the command succeeded or failed.
+- If succeeded: the per-signal metrics summary (signal name, horizons,
+  IC/ICIR/Sharpe/N for at least one horizon per signal).
+- If failed: the truncated traceback.
+- The git commit SHA at which it was run (must match HEAD).
+- The wall-clock runtime.
+
+Claims like "tests passing" without "smoke test passing AND here's its
+output" are insufficient. Tests can pass when integration is broken;
+this project has demonstrated that twice.
+
+If the canonical verification command itself changes (e.g. a new
+end-to-end script becomes the standard), update CONVENTIONS §9 in the
+same commit that introduces the change.
+
+### Rationale
+The cost of running the smoke test once at session end is ~6 seconds.
+The cost of *not* running it has been measured in sub-sessions of
+investigation. The discipline is asymmetric in our favor.
+
+This is enforceable via the convention codified in CONVENTIONS.md §9.
+The DD entry exists to record **why** the convention exists, so a future
+contributor (or future self) doesn't strip the requirement as
+ceremonial.
+
+### Open items
+- The canonical verification command may need to grow as the system
+  grows (e.g. once paper trading is wired up, a "smoke broker connection"
+  step may join the canonical command). Revisit at end of each phase.
+
+---
 
 These are items raised but not resolved. Each should be revisited at the
 indicated milestone.

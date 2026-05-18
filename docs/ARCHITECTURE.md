@@ -2,13 +2,15 @@
 # Systematic Multi-Asset Trading System
 
 **Version:** 0.4
-**Last Updated:** 2026-05-15
+**Last Updated:** 2026-05-16
 **Status:** Phases 0–4 implemented; Phase 5 (Signal Hardening) in progress
+through DD-010 (commit `ff92ff4` + fix `b1e0ab3`).
 
 **Companion documents:**
 - `ROADMAP.md` — what gets built when
 - `DESIGN_DECISIONS.md` — why the design is what it is (rationale)
 - `PROGRESS.md` — current execution state and known issues
+- `CONVENTIONS.md` — coding standards, data contracts, handoff protocol
 
 **Vocabulary note (v0.2):** This document uses **"Stage 1"** and **"Stage 2"**
 to describe the data-quality tier of the system — Stage 1 is the current
@@ -17,14 +19,13 @@ post-Bloomberg / point-in-time upgrade. These map to **Phases 0–6** and
 **Phase 7** respectively in `ROADMAP.md`.
 
 **v0.3 change:** Modeling layer split into three sublayers (conditioning,
-predictive, combination). See new Section 4 below.
+predictive, combination). See Section 4.
 
-**v0.4 change:** Layer 1 → Layer 2 contract changed to `Dict[str, pd.Series]`
-keyed by catalogue variable name (Milestone 5.7). `Signal.compute()` signature
-updated accordingly. The portfolio layer continues to consume the wide
-DataFrame panel; the backtest engine translates between the two shapes at one
-explicit boundary (see DD-009). Layer 1.5 catalogue is now stateful and
-operational.
+**v0.4 change:** §4.1 (Signal base class) updated to reflect DD-010
+(`instruments`, `instrument_prices`, `evaluation_horizons`). §4.3
+(SignalEvaluator) updated to reflect DD-009 (prices in, returns
+computed internally). §5 (data contracts) updated to reflect 5.7
+`Dict[str, pd.Series]` contract and DD-010 signal/portfolio handoff.
 
 ---
 
@@ -100,7 +101,7 @@ If a design decision is made that changes this document, update it immediately a
 │   DataStore             (DuckDB, raw/adjusted/derived)   │
 │   CachedSource          (wrapper: cache-first fetches)   │
 └────────────────────────┬────────────────────────────────┘
-                         │  Dict[str, pd.Series]
+                         │  standard DataFrames
 ┌────────────────────────▼────────────────────────────────┐
 │                LAYER 1.5: DATA CATALOGUE                 │
 │                                                          │
@@ -179,22 +180,17 @@ consumes a price series. This is what makes the modeling layer extensible —
 adding a new conditioning model or predictive model doesn't require changes
 to downstream code.
 
-**Where work currently stands (2026-05-15):**
+**Where work currently stands (2026-05-14):**
 - Layer 1: complete through Milestone 5.4 (CachedSource active)
-- Layer 1.5 (catalogue): operational — stateful runtime with cache-first
-  lookup. Template-based universe expansion. Some stateful-API tests deferred
-  (PROGRESS.md §5.7).
+- Layer 1.5 (catalogue): partial — registry exists (5.3), stateful lookup pending (5.7)
 - Layer 2a (conditioning): not started — first piece is Rates Trend regime filter (5.11)
 - Layer 2b (predictive): not started — Phase 6/7
-- Layer 2c (signals): three signals operational on the new Series contract (5.5 + 5.7)
+- Layer 2c (signals): three signals operational (5.5)
 - Layer 2d (combination): specced, not built — Phase 6/7
-- Layer 3: built per Phase 3, panel contract unchanged (DD-009)
-- Layer 4: built per Phase 4. Engine refactored 5.7 to consume Series on its
-  public API and translate to the panel at one boundary
-  (`BacktestEngine._assemble_price_panel`). Output container in place (5.6).
+- Layer 3: built per Phase 3, not re-verified against new signals
+- Layer 4: built per Phase 4, not re-verified
 
-See DESIGN_DECISIONS.md DD-003 for the rationale behind the 2a/2b/2c/2d split,
-and DD-009 for the engine-boundary hybrid contract.
+See DESIGN_DECISIONS.md DD-003 for the rationale behind the 2a/2b/2c/2d split.
 
 ---
 
@@ -223,11 +219,6 @@ class DataSource(ABC):
 - Columns depend on source type but always include `close`
 - No NaN values (cleaning happens downstream in DataCleaner)
 - Column `source` populated with source identifier string
-
-Note: this is the contract between sources and downstream consumers within
-Layer 1 (DataCleaner, DataStore, CachedSource). The **Layer 1 → Layer 2**
-contract — what the catalogue serves to signals — is `Dict[str, pd.Series]`,
-see Section 5.
 
 ### 3.2 Source Implementations
 
@@ -338,35 +329,43 @@ Raw data is never overwritten — append only, or raise.
 
 **File:** `src/signals/base.py`
 
+The contract reflects DD-010 (signal owns `instruments` and
+`instrument_prices()`) and the 5.7 signal-interface change
+(`Dict[str, pd.Series]` not `Dict[str, pd.DataFrame]`).
+
 ```python
 class Signal(ABC):
-    # Must be defined by every subclass
+    # Required class attributes (validated in __init_subclass__).
     name: str
     asset_class: str               # 'fx', 'rates', 'equities'
     signal_type: str               # 'carry', 'momentum', 'value', 'macro', 'sentiment'
-    frequency: str                 # 'daily', 'weekly'
+    frequency: str                 # 'daily', 'weekly', 'monthly'
     params: dict                   # all parameters — no hardcoding in compute()
-    required_variables: List[str]  # catalogue variable names this signal consumes
+    required_variables: list[str]  # catalogue variable names compute() reads
+    instruments: list[str]         # catalogue variable names representing
+                                   # the tradeable instruments. May be set
+                                   # in __init__ from config; equal-,
+                                   # disjoint-, or overlapping- with
+                                   # required_variables per signal semantics.
+    evaluation_horizons: list[int] # horizons in periods of `frequency`.
+                                   # Class attribute, NOT loaded from YAML.
 
     @abstractmethod
     def compute(self, data: Dict[str, pd.Series]) -> pd.Series:
-        """
-        Returns a signal series: index=date, values=raw signal (pre-normalisation).
-        Must be free of lookahead bias — can only use data available at each point in time.
+        """Returns a raw signal series. Single-asset signals: DatetimeIndex.
+        Cross-sectional: MultiIndex (date, asset). Must be free of
+        lookahead bias — value at t may use only data with index <= t."""
 
-        Input contract (5.7+):
-            data is a dict keyed by catalogue variable name (DD-007),
-            value is a pd.Series with DatetimeIndex (UTC), float64, no NaN.
-            Each Series has .name equal to its catalogue variable name.
-        """
+    def instrument_prices(self, data: Dict[str, pd.Series]) -> pd.Series:
+        """Return prices indexed compatibly with the signal output's
+        asset axis. Default: pack self.instruments from data to MultiIndex
+        (date, asset). Subclasses override for single-asset (return plain
+        DatetimeIndex Series) or for non-identity mappings (FX Carry
+        inverts USDXXX-orientation spots so log returns match the
+        <non-USD>/USD pair convention)."""
 
     def normalise(self, signal: pd.Series, method='zscore', window=252) -> pd.Series:
         """Standardise signal. Default: rolling z-score. Subclasses may override."""
-
-    def evaluate(self, signal: pd.Series, forward_returns: pd.Series) -> SignalMetrics:
-        """Convenience wrapper around `SignalEvaluator.evaluate()`. Computes IC, ICIR,
-        hit rate, Sharpe, decay at the signal's natural `frequency`. Returns a
-        `SignalMetrics` dataclass. See `src/evaluation/signal_evaluator.py`."""
 
     def get_metadata(self) -> dict:
         """Returns full signal specification for logging and reproducibility."""
@@ -375,10 +374,14 @@ class Signal(ABC):
 **Rule:** `compute()` may only use data with index <= current date. The BacktestEngine
 enforces this by slicing data before passing to `compute()`.
 
-**5.7 interface change:** Before 5.7, `compute()` took `Dict[str, pd.DataFrame]`
-keyed by ticker, and the attribute was `required_data`. From 5.7, both are
-keyed by catalogue variable name and the value is `pd.Series` (one Series per
-variable, not a DataFrame). Multi-instrument signals receive multiple Series.
+**Disjointness contract** (`required_variables` vs `instruments`): the
+two lists may be identical, disjoint, or overlapping. The signal class
+decides based on semantics:
+- Single-asset (Rates Trend): identical (`[TLT_CLOSE]` for both).
+- Cross-sectional factor on prices (Equity Momentum): identical
+  (per-ticker `*_CLOSE` names).
+- Cross-sectional computed-from-X-traded-on-Y (FX Carry): disjoint
+  (rate variables in, FX spot variables out).
 
 ### 4.2 Signal Implementations (Stage 1)
 
@@ -454,6 +457,14 @@ Parameters:
 
 **File:** `src/evaluation/signal_evaluator.py`
 
+**Contract (DD-009):** `evaluate(signal, prices, horizon, frequency, *,
+forward_returns_fn=None)`. Takes **prices** as the second positional and
+computes 1-period log returns internally per CONVENTIONS §3.2 — single
+DatetimeIndex via `log(p / p.shift(1))`, MultiIndex (date, asset) via
+the same applied per-asset. Custom return constructions remain
+available via the `forward_returns_fn` callable (a function, not a
+Series). See DESIGN_DECISIONS.md DD-009.
+
 Computes and returns a `SignalMetrics` dataclass for any signal:
 
 ```python
@@ -472,16 +483,17 @@ class SignalMetrics:
     frequency: str          # 'daily' | 'weekly' | 'monthly'
 ```
 
-**Evaluation horizons:** Default — evaluate at 1, 5, 21, 63 days for daily signals;
-at 1, 2, 3, 6 months for monthly signals; analogous for weekly. The horizon with
-the strongest IC determines the signal's natural rebalancing frequency.
+**Evaluation horizons:** Each signal class declares its own
+`evaluation_horizons` (DD-010): 1, 5, 21, 63 days for daily signals;
+1, 2, 3, 6 months for monthly signals.
 
-**Frequency layer (Milestone 5.2):** `SignalEvaluator.evaluate(..., frequency=...)`
-resamples both signal and returns to the chosen frequency before evaluation. The
-signal is resampled by taking the first non-zero value per period (carrying
-forward for all-zero periods); log returns are summed over each period
-(compounding under the log convention, CONVENTIONS.md §3.2). The forward-return
-shift `shift(-(horizon + 1))` is applied in periods of the chosen frequency.
+**Frequency layer (Milestone 5.2):** `SignalEvaluator.evaluate(...,
+frequency=...)` resamples both signal and returns to the chosen
+frequency before evaluation. The signal is resampled by taking the
+first non-zero value per period (carrying forward for all-zero
+periods); log returns are summed over each period (compounding under
+the log convention, CONVENTIONS.md §3.2). The forward-return shift
+`shift(-(horizon + 1))` is applied in periods of the chosen frequency.
 Annualisation of Sharpe uses 252 / 52 / 12 for daily / weekly / monthly.
 
 ### 4.4 SignalCorrector
@@ -566,56 +578,67 @@ class SignalCombiner:
 
 ## 5. Data Contracts Between Layers
 
-These contracts are mandatory. No exceptions. See also CONVENTIONS.md §3.6
-for the rationale behind the per-layer shape choices.
+These contracts are mandatory. No exceptions.
 
-### Layer 1 → Layer 2 (Data to Signals) — 5.7 contract
+### Layer 1 → Layer 1.5 (Source to Catalogue)
+```
+pd.DataFrame:
+  index: DatetimeIndex (UTC, business days only)
+  columns: at minimum ['close'], optionally ['open', 'high', 'low', 'volume']
+  dtypes: float64 for price/rate columns
+  NaN policy: no NaN values (DataCleaner guarantees this)
+  metadata: df.attrs dict with {source, ticker, frequency, clean_version, known_limitations}
+```
+
+### Layer 1.5 → Layer 2 (Catalogue to Signals) — 5.7 contract
 ```
 Dict[str, pd.Series]:
   key: catalogue variable name (DD-007 naming, e.g. "TLT_CLOSE", "DFF", "EUR_RATE")
   value: pd.Series
-    index: DatetimeIndex (UTC, daily or coarser per the variable's native frequency)
+    index: DatetimeIndex (UTC, business days, at the requested frequency
+           — catalogue forward-fills coarser native frequencies per DD-004)
     dtype: float64
-    NaN policy: no NaN values (DataCleaner + CachedSource guarantee this)
+    NaN policy: no NaN values
   metadata: each Series has a .name attribute equal to the catalogue variable name
 ```
 
-The catalogue (Layer 1.5) is the only place that constructs these dicts.
-Signal code does not call `DataStore`, `CachedSource`, or any concrete source
-directly.
+**Note (DD-010 follow-up):** the runner fetches both compute inputs and
+instrument prices at `frequency="daily"`. The catalogue forward-fills
+coarser native frequencies (e.g. monthly FRED rates) to daily per
+DD-004. The signal's `compute()` consumes daily-indexed Series and
+produces a daily-indexed signal output; the evaluator's frequency layer
+resamples to the signal's natural evaluation frequency.
 
-### Layer 2 → Layer 3 (Signals to Portfolio)
+### Layer 2 → Layer 2d (Signal output, into combiner/evaluator)
 ```
 pd.Series:
-  index: DatetimeIndex (same frequency as input data)
+  single-asset signals: DatetimeIndex
+  cross-sectional signals: MultiIndex (date, asset), 2 levels
   values: float in [-1, 1] (normalised, z-scored or ranked)
-  name: signal identifier string (e.g. 'fx_carry_g10')
+  name: signal identifier string (e.g. 'fx_carry')
   attrs: {asset_class, signal_type, last_evaluated: date, icir, dsr}
 ```
 
-For multi-instrument (cross-sectional) signals, the signal output is a
-`pd.Series` with a `MultiIndex(date, asset)` where `asset` is the catalogue
-variable name of the tradeable instrument.
+Plus, per DD-010, every signal also exposes:
+- `signal.instruments: list[str]` — catalogue names of tradeable instruments
+- `signal.instrument_prices(data) -> pd.Series` — prices in the same
+  index shape as `compute()` output. SignalEvaluator consumes this
+  directly per the DD-009 contract.
 
 ### Layer 3 → Layer 4 (Portfolio to Backtest)
 ```
 pd.DataFrame:
   index: DatetimeIndex
-  columns: instrument identifiers (catalogue variable names)
+  columns: instrument identifiers (read from signal.instruments — DD-010)
   values: target weights (sum to 1 for long-only, sum to 0 for long-short)
   attrs: {gross_exposure, net_exposure, n_positions, rebalance_cost_estimate}
 ```
 
-### Engine ↔ Portfolio internal boundary (DD-009)
-
-`BacktestEngine` accepts the Layer 1 → Layer 2 contract
-(`Dict[str, pd.Series]`) on its public `run()` API. Internally, at the point
-of handing off to `PortfolioConstructor.construct`, the engine assembles a
-wide DataFrame panel (rows = dates, columns = instruments from
-`portfolio_config["instruments"]`) via `_assemble_price_panel`. This is the
-one and only place in the codebase that bridges the two shapes. See DD-009
-for the rationale (option A hybrid) and 5.16 (placeholder) if full
-Series-throughout uniformity ever becomes necessary.
+The portfolio layer continues to consume a wide DataFrame panel; the
+backtest engine translates from the signal-layer
+`Dict[str, pd.Series]` to the portfolio-layer panel at one explicit
+boundary (`engine._assemble_price_panel`). See PROGRESS.md §5.7
+"option A hybrid" for the rationale.
 
 ---
 
@@ -680,8 +703,8 @@ class BacktestEngine:
     def run(
         self,
         signals: List[Signal],
-        portfolio_config: PortfolioConfig,  # must include 'instruments' list (5.7)
-        data: Dict[str, pd.Series],          # 5.7 contract
+        portfolio_config: PortfolioConfig,
+        data: DataStore,
         method: str,           # 'walk_forward' | 'expanding' | 'cpcv'
         train_window: int,     # trading days
         test_window: int,      # trading days
@@ -690,11 +713,6 @@ class BacktestEngine:
         end_date: date
     ) -> BacktestResult
 ```
-
-`portfolio_config["instruments"]` is the list of catalogue variable names
-representing tradeable instruments. The engine uses this list to assemble the
-internal price panel via `_assemble_price_panel`. Pre-5.7 `prices_key` is no
-longer accepted.
 
 ### 7.2 Walk-Forward Engine
 
@@ -844,5 +862,3 @@ FRED, Yahoo, ETF proxies). Stage 2 = post-Bloomberg upgrade = ROADMAP Phase 7.2.
 | IB historical data used for reconciliation only | Primary backtest data from Yahoo/FRED | Ongoing |
 | No short-selling cost model for equities | Long-short equity P&L overstated | Stage 2 (ROADMAP Phase 7.2) |
 | FRED macro data not fully point-in-time for all series | Minor lookahead bias on revised series | Ongoing (use Alfred where available) |
-| Engine prices portfolio off first instrument only | Multi-instrument backtest returns approximate | Future refactor — needs per-instrument weight-by-return path |
-| Catalogue → engine → portfolio path not driven by any end-to-end script | "Tests passing" ≠ "system runs end-to-end" | `scripts/backtest_strategy.py` (Phase 6 prerequisite) |

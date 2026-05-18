@@ -1,7 +1,7 @@
 # ROADMAP.md
 # Build Phases and Completion Criteria
 
-**Version:** 0.6
+**Version:** 0.4
 **Last Updated:** 2026-05-16
 **Rule:** Do not begin a phase until all completion criteria for the previous phase are met.
 Completion means: tests pass, data contracts are verified, and the module has been
@@ -11,6 +11,7 @@ reviewed in Claude.ai against ARCHITECTURE.md.
 - `ARCHITECTURE.md` — system design (source of truth for structure)
 - `DESIGN_DECISIONS.md` — rationale for major design choices (why, not what)
 - `PROGRESS.md` — current execution state and known issues
+- `CONVENTIONS.md` — coding standards, data contracts, handoff protocol
 
 ---
 
@@ -117,11 +118,39 @@ This phase was not in the original roadmap but is required before paper trading.
 Evaluation in Phase 4 revealed that all three signals are BORDERLINE or FAIL on public
 data with thin cross-sections. Phase 5 addresses the root causes systematically.
 
+**Note (v0.4):** Phase 5 was substantially reordered on 2026-05-14
+(see PROGRESS.md "Phase 5 reordering"); v0.4 of this document brings
+the ROADMAP into alignment with the milestone numbering used in
+PROGRESS.md and DESIGN_DECISIONS.md.
+
+### Current milestone status
+
+| # | Milestone | Status |
+|---|---|---|
+| 5.1 | Reference Documents (Phase 2-4 .docx) | ⬜ Not started |
+| 5.2 | Frequency Layer | ✅ Complete |
+| 5.3 | Variable Library (stateless registry) | ✅ Complete |
+| 5.4 | Data Persistence (CachedSource) | ✅ Complete |
+| 5.5 | G10 FX Expansion | ✅ Complete |
+| 5.6 | Output Container + Reporting Hygiene | ✅ Complete |
+| 5.7 | Variable Catalogue: stateful + signal-interface change | ✅ Complete |
+| DD-009 | Evaluator price contract | ✅ Complete (commit `ad41103`) |
+| 5.8 | Transformation Pipeline + Derived Variable Persistence | ✅ Complete |
+| DD-010 | Signal owns instruments + instrument_prices | ✅ Complete (commits `ff92ff4`, `b1e0ab3`) |
+| 5.9 | FX Carry Quarterly Horizon Experiment | ⬜ Not started |
+| 5.10 | Universe Expansion (FX EM, equities, rates) | ⬜ Not started |
+| 5.11 | Rates Trend Regime Filter | ⬜ Not started |
+| 5.12 | IBSource (FX focus) | ⬜ Not started |
+| 5.13 | Forward-Spot Basis Carry Signal | ⬜ Not started |
+| 5.14 | Vol Conditioning Experiment on FX Carry | ⬜ Not started |
+
+Milestones below cover only the remaining (un-shipped) work. For
+completed milestones see PROGRESS.md.
+
 ---
 
-### Milestone 5.1 — Reference Documents
+### Milestone 5.1 — Reference Documents ⬜
 **Goal:** Written documentation of Phases 2-4 for reference and interview use.
-**Status:** 🔄 In Progress
 
 - [ ] `docs/phase2_signal_engine.docx` — signal logic, IC/ICIR formulas, DSR/PBO/SPA
 - [ ] `docs/phase3_portfolio_engine.docx` — vol targeting, risk parity, cost model, Kelly
@@ -129,215 +158,7 @@ data with thin cross-sections. Phase 5 addresses the root causes systematically.
 
 ---
 
-### Milestone 5.2 — Frequency Layer
-**Goal:** Evaluation pipeline handles daily/weekly/monthly automatically for any signal.
-
-**Problem:** All signals are currently evaluated at daily frequency even when they
-rebalance monthly. This produces misleading results (repeated identical values,
-constant-input warnings, misaligned IC calculations).
-
-**Tasks:**
-- [ ] Add `frequency` parameter to `SignalEvaluator.evaluate()`
-  - `'daily'` — current behaviour
-  - `'weekly'` — resample signal and returns to weekly before evaluation
-  - `'monthly'` — resample to monthly, use month-start alignment
-- [ ] Resampling logic: for signal, take first non-zero value per period;
-  for returns, compound daily returns over the period
-- [ ] Update all three signal configs to declare their natural frequency
-- [ ] Re-run all signal evaluations at correct frequency
-- [ ] Add tests for frequency resampling in `tests/test_evaluation.py`
-
-**Completion criteria:**
-- [ ] `evaluator.evaluate(sig, returns, horizon=3, frequency='monthly')` works without
-  manual resampling
-- [ ] No ConstantInputWarning for monthly signals evaluated at monthly frequency
-- [ ] All three signals re-evaluated at their natural frequency; results in PROGRESS.md
-
----
-
-### Milestone 5.3 — Variable Library
-**Goal:** Single source of truth for all variables — raw, transformed, and derived.
-
-**Architecture:**
-```
-configs/data/variables/
-├── macro.yaml          — FRED series (rates, inflation, employment)
-├── market.yaml         — prices, FX, ETFs from Yahoo/IB
-├── sentiment.yaml      — COT positioning, VIX, put/call ratio
-├── alternative.yaml    — earnings, credit spreads, non-standard sources
-└── transformations.yaml — all computed/transformed variables (any domain)
-
-configs/data/derived_variables.yaml — signals, regime indicators, portfolio outputs
-```
-
-**Each variable entry contains:**
-```yaml
-# Raw variable example
-DFF:
-  domain: macro
-  layer: raw
-  source: FRED
-  series_id: DFF
-  description: Federal Funds Effective Rate
-  frequency: daily
-  unit: percent
-  use_alfred_vintage: false
-  used_by: [fx_carry, regime_filter]
-
-# Transformed variable example
-DFF_ZSCORE_252:
-  domain: macro
-  layer: transformed
-  source_variable: DFF
-  transformation: rolling_zscore
-  window: 252
-  description: DFF rolling 252-day z-score
-  frequency: daily
-
-# Derived variable example (in derived_variables.yaml)
-fx_carry_signal:
-  layer: derived
-  type: signal
-  inputs: [DFF_ZSCORE_252, EUR_RATE_ZSCORE, GBP_RATE_ZSCORE]
-  script: src/signals/fx/carry.py
-  frequency: monthly
-  output_range: [-1, 1]
-```
-
-**Tasks:**
-- [ ] Create `configs/data/variables/macro.yaml` — all FRED series used or planned
-- [ ] Create `configs/data/variables/market.yaml` — all Yahoo/IB tickers
-- [ ] Create `configs/data/variables/transformations.yaml` — all derived transformations
-- [ ] Create `configs/data/derived_variables.yaml` — all signals and indicators
-- [ ] Write `src/data/variable_catalog.py` — loads and validates catalog, resolves lineage
-- [ ] Add `DataStore.get_lineage()` implementation using catalog
-- [ ] Add tests for catalog loading and lineage resolution
-
-**Completion criteria:**
-- [ ] Every variable used in Phases 1-4 has a catalog entry
-- [ ] `variable_catalog.get_lineage('fx_carry_signal')` returns full chain to raw sources
-- [ ] Catalog validates on load — no undefined source_variable references
-
----
-
-### Milestone 5.4 — Data Persistence
-**Goal:** DataStore is actually used — fetch once, read many times.
-
-**Problem:** DataStore exists but is empty. Every session re-fetches from FRED/Yahoo.
-FRED flaps intermittently. This is fragile and slow.
-
-**Tasks:**
-- [ ] Wire `FREDSource.fetch()` to write to `raw.duckdb` on first fetch
-- [ ] Wire `YahooSource.fetch()` to write to `raw.duckdb` on first fetch
-- [ ] Wire `DataCleaner.clean()` to write output to `adjusted.duckdb`
-- [ ] Add `DataStore.fetch_or_load(source, ticker, frequency)` — reads from store if
-  available, fetches and stores if not
-- [ ] Add cache invalidation: `force_refresh=True` parameter to re-fetch
-- [ ] Populate store with all Phase 1 data (FRED rate series, Yahoo FX + ETFs + equities)
-- [ ] Add tests verifying data round-trips through store correctly
-
-**Completion criteria:**
-- [ ] `store.list_available()` shows all Phase 1 series
-- [ ] Running evaluation scripts twice: second run uses store, no network calls
-- [ ] `get_lineage()` traces raw → adjusted for each stored series
-
----
-
-### Milestone 5.5 — G10 FX Expansion ✅
-**Goal:** Full G10 cross-section for FX Carry signal.
-
-**Completed 2026-05-14.**
-
-7-currency USD-anchored cross-section (6 active pairs after USD-anchoring,
-replacing pre-5.5 4-pair bilateral scheme that double-counted positions).
-Pair labels mechanically `<non-USD>/USD` — see DESIGN_DECISIONS.md DD-005 for
-market-convention deferral.
-
-**Results:** IC near zero across horizons, ICIR effectively zero. Signal-
-quality finding; not a methodology bug. Infrastructure milestone; methodology
-fixes in subsequent milestones.
-
----
-
-### Milestone 5.6 — Output Container + Reporting Hygiene ✅
-**Goal:** Structured output storage with reproducibility manifests; no more
-overwriting reports.
-
-**Completed 2026-05-15.**
-
-`OutputManager` routes runs into `reports/{exploratory,variables,strategies}/`
-with timestamped folders, `manifest.json` (git commit, dirty flag, config
-snapshot), and per-kind `index.csv`. Five reusable plot functions in
-`src/reporting/plots.py`. `scripts/evaluate_signals.py` refactored to use the
-manager. 28 new tests (119 → 147 passing). See PROGRESS.md §5.6 and
-CONVENTIONS.md §8 for details.
-
----
-
-### Milestone 5.7 — Variable Catalogue Wired Into Pipeline ✅
-**Goal:** Make the `VariableCatalog` (5.3 registry) actually serve data, not
-just declare it. Cache-first lookup with transformation support.
-
-**Completed 2026-05-15** (catalogue + signal interface + engine boundary, in
-two checkpoints). **Deferred items closed out 2026-05-16.** See PROGRESS.md
-§5.7 for full detail.
-
-Catalogue promoted from stateless registry to stateful runtime object holding
-DataStore + sources. `catalogue.get(name, frequency, start, end) -> pd.Series`
-returns variables with cache-first lookup. Template-based universe expansion
-(`configs/data/universes/*.yaml`) per DD-008. Signal interface changed to
-`Dict[str, pd.Series]` keyed by catalogue variable name (DD-007). Backtest
-engine accepts the Series contract on its public API and translates to the
-portfolio-layer panel at one explicit boundary (`_assemble_price_panel`) —
-"option A hybrid" per DD-009.
-
-**Deferred items closed out 2026-05-16:**
-- [x] `tests/test_variable_catalog.py` additions for the stateful API: 11 new
-      tests covering `get()` returning Series, native vs resampled frequency,
-      registry-only error, transformed-variable deferral (5.8 pin), universe
-      expansion end-to-end, and `force_refresh` cache bypass (14 → 25 tests
-      in this file).
-- [x] `force_refresh: bool = False` plumbed through `VariableCatalog.get()`
-      and threaded into the `--refresh` CLI flag in
-      `scripts/evaluate_signals.py` (no longer advisory).
-
-Test count: 147 → 151 (signal refactor) → 162 (deferred close-out) →
-**165** (resample anchoring fix and regression tests).
-
-**Follow-up before `backtest_strategy.py` — shipped 2026-05-16 (commit `6674b24`):**
-- [x] Fix `VariableCatalog._resample` anchoring. Forward-fill now anchors
-      on caller-provided `start`/`end`; requests predating source coverage
-      raise `CatalogError`. Three regression tests added.
-
----
-
-### Milestone 5.8 — Transformation Pipeline + Derived Variable Persistence
-**Goal:** Declared transformations actually execute, and their outputs live in
-`derived.duckdb` for reuse across runs and signals.
-
-**Problem:** `configs/data/variables/transformations.yaml` declares 7
-transformations (z-scores, log returns, vol, slopes) but no code computes them.
-Derived variables don't persist; they get recomputed each run.
-
-**Tasks:**
-- [ ] New module `src/data/transformations.py` with one function per
-      transformation type (z-score, log return, rolling vol, rate slope, etc.)
-- [ ] Transformation executor: given a transformation spec, look up inputs from
-      catalogue, apply, return derived series
-- [ ] Wire into catalogue: requesting a derived variable triggers transformation
-      execution if not cached
-- [ ] Persist derived outputs to `derived.duckdb` with proper invalidation
-      (re-compute if transformation spec changed)
-- [ ] Tests: each transformation has correctness tests; cache invalidation works
-
-**Completion criteria:**
-- [ ] All 7 declared transformations execute and persist
-- [ ] Second run of any signal that uses derived vars is fully offline
-- [ ] Changing a transformation spec triggers re-computation
-
----
-
-### Milestone 5.9 — FX Carry Quarterly Horizon Experiment
+### Milestone 5.9 — FX Carry Quarterly Horizon Experiment ⬜
 **Goal:** Quick read on whether the near-zero monthly IC is partly a horizon
 mismatch (see DESIGN_DECISIONS.md OQ-001).
 
@@ -352,7 +173,7 @@ mismatch (see DESIGN_DECISIONS.md OQ-001).
 
 ---
 
-### Milestone 5.10 — Universe Expansion (FX EM, Equities, Rates)
+### Milestone 5.10 — Universe Expansion (FX EM, Equities, Rates) ⬜
 **Goal:** Expand cross-section meaningfully now that catalogue/transformation
 infrastructure is in place. See DESIGN_DECISIONS.md DD-002.
 
@@ -369,6 +190,8 @@ infrastructure is in place. See DESIGN_DECISIONS.md DD-002.
 - [ ] Add TIP and LQD to rate ETF universe
 - [ ] Re-evaluate all three signals on expanded universes
 - [ ] Document results vs pre-expansion baseline
+- [ ] Resolve the Equity Momentum CatalogError on first-business-day-of-year
+      before forcing a refresh (see PROGRESS.md Known Issues).
 
 **Completion criteria:**
 - [ ] All three signals re-evaluated, results in `reports/variables/`
@@ -376,7 +199,7 @@ infrastructure is in place. See DESIGN_DECISIONS.md DD-002.
 
 ---
 
-### Milestone 5.11 — Rates Trend Regime Filter
+### Milestone 5.11 — Rates Trend Regime Filter ⬜
 **Goal:** Make Rates Trend usable by conditioning on trending regime. First
 piece of conditioning layer (ARCHITECTURE.md Layer 2a).
 
@@ -405,7 +228,8 @@ REGIME_RATES_TREND:
 - [ ] Add `TLT_VOL_63D` to `configs/data/variables/transformations.yaml`
 - [ ] Add `REGIME_RATES_TREND` to `configs/data/derived_variables.yaml`
 - [ ] Add `regime_filter` parameter to `RatesTrendSignal.compute()`
-- [ ] Evaluate Rates Trend with regime filter across full period and sub-periods
+- [ ] Evaluate Rates Trend with regime filter across full period and
+      sub-periods
 - [ ] Add test: signal = 0 when regime indicator = 0
 
 **Completion criteria:**
@@ -415,7 +239,7 @@ REGIME_RATES_TREND:
 
 ---
 
-### Milestone 5.12 — IBSource (FX Focus)
+### Milestone 5.12 — IBSource (FX Focus) ⬜
 **Goal:** Wire Interactive Brokers as a third data source, scoped narrowly to
 FX (real-time and historical). See DESIGN_DECISIONS.md DD-001.
 
@@ -439,14 +263,14 @@ API port 7497, IDEALPRO FX subscription active. ✅ All confirmed 2026-05-14.
 
 ---
 
-### Milestone 5.13 — Forward-Spot Basis Carry Signal
-**Goal:** True CIP-implied carry signal using actual FX forward points from IB.
-See DESIGN_DECISIONS.md OQ-001 item 1.
+### Milestone 5.13 — Forward-Spot Basis Carry Signal ⬜
+**Goal:** True CIP-implied carry signal using actual FX forward points from
+IB. See DESIGN_DECISIONS.md OQ-001 item 1.
 
-**Problem:** Current FX Carry approximates carry via interest rate differentials.
-Real carry is `(forward_rate - spot_rate) / spot_rate`. Post-2008 CIP deviations
-mean these differ meaningfully and the deviation has been a documented return
-source (Du, Tepper, Verdelhan 2018).
+**Problem:** Current FX Carry approximates carry via interest rate
+differentials. Real carry is `(forward_rate - spot_rate) / spot_rate`.
+Post-2008 CIP deviations mean these differ meaningfully and the deviation
+has been a documented return source (Du, Tepper, Verdelhan 2018).
 
 **Tasks:**
 - [ ] New signal `src/signals/fx/basis_carry.py`
@@ -456,12 +280,13 @@ source (Du, Tepper, Verdelhan 2018).
 - [ ] Document the CIP deviation as its own data series
 
 **Completion criteria:**
-- [ ] Basis carry signal evaluated; IC/ICIR compared to rate-differential carry
+- [ ] Basis carry signal evaluated; IC/ICIR compared to rate-differential
+      carry
 - [ ] CIP deviation series available for future analysis
 
 ---
 
-### Milestone 5.14 — Vol Conditioning Experiment on FX Carry
+### Milestone 5.14 — Vol Conditioning Experiment on FX Carry ⬜
 **Goal:** Test the conditioning layer infrastructure on FX Carry. Documented
 effect: carry works in low-vol regimes, fails in high-vol crises.
 
@@ -481,42 +306,25 @@ Expected effect may be muted vs literature.
 
 ---
 
-### Milestone 5.16 — Portfolio Layer Series Unification (PLACEHOLDER, LOW PRIORITY)
-**Status:** ⬜ Not scheduled. Placeholder only.
-
-**Context:** 5.7 landed the signal layer on `Dict[str, pd.Series]` per the
-catalogue contract, but deliberately kept the portfolio layer
-(`PositionSizer`, `PortfolioConstructor`, `CostModel`) on the wide
-DataFrame panel. The engine translates between the two shapes at one
-explicit boundary (`BacktestEngine._assemble_price_panel`). See
-DESIGN_DECISIONS.md DD-009 for the rationale.
-
-**If ever needed:** rewrite the portfolio layer to consume `Dict[str, pd.Series]`
-end-to-end. Cost: rewriting `PositionSizer.volatility_target`,
-`PositionSizer.risk_parity`, `PortfolioConstructor.construct`, and the
-`CostModel.apply_costs` call paths. Benefit: contract uniformity end-to-end.
-
-**Do not do speculatively.** Wait for a concrete need — e.g., a signal that
-produces per-variable forward returns and the engine needs to consume them
-without coercing through a panel.
-
----
-
 ### Phase 5 Completion Criteria
-- [ ] All existing tests still pass (current: 151)
-- [x] Frequency layer working — no manual resampling required in evaluation scripts (5.2)
+- [ ] All existing tests still pass (current: 229)
+- [x] Frequency layer working — no manual resampling required in evaluation
+      scripts (5.2)
 - [x] Variable catalogue stateful and serving data via cache-first lookup (5.7)
-- [ ] Transformation pipeline executes declared transformations and persists derived
-      variables (5.8)
+- [x] Transformation pipeline executes declared transformations and persists
+      derived variables (5.8)
 - [x] Output container in place with reproducibility manifests (5.6)
+- [x] Signal owns instruments + instrument_prices (DD-010)
+- [x] Evaluator takes prices, computes returns internally (DD-009)
 - [x] FX Carry re-evaluated on full G10 (5.5)
 - [ ] Universe expansion complete (5.10)
 - [ ] Rates Trend regime filter implemented and evaluated (5.11)
 - [ ] IBSource integrated for FX (5.12)
 - [ ] At least one methodology investigation completed (5.9 + 5.13 or 5.14)
 - [ ] PROGRESS.md updated with all new results
-- [ ] `ARCHITECTURE.md` reflects modeling layer split (2a/2b/2c)
-- [ ] `DESIGN_DECISIONS.md` current
+- [x] `ARCHITECTURE.md` reflects modeling layer split (2a/2b/2c)
+- [x] `DESIGN_DECISIONS.md` current
+- [ ] At least one signal passes ICIR > 0.3 after Phase 5 improvements
 
 ---
 
@@ -531,13 +339,8 @@ without coercing through a panel.
 - IDEALPRO FX subscription active ✅ (2026-05-14)
 - IBSource module built in Milestone 5.12 (FX historical/real-time)
 - Market-convention FX label translation layer (per DESIGN_DECISIONS.md DD-005)
-- **End-to-end backtest driver** ✅ `scripts/backtest_strategy.py` shipped
-  2026-05-16 (commit `3095fc0`). Mirrors `scripts/evaluate_signals.py`
-  structure; calls `BacktestEngine.run`. Real-data verification on Rates
-  Trend / TLT 2010-2024 produced Sharpe -0.55 matching the historical
-  Phase 4 validation number — the 5.7 wiring change preserved numerics.
-  See PROGRESS.md "Phase 6 prerequisite — `scripts/backtest_strategy.py`"
-  for full detail and surfaced limitations.
+- Resolve Equity Momentum CatalogError first-business-day-of-year edge
+  (PROGRESS.md Known Issues)
 
 ### Milestone 6.1 — IBSource Live Feed Extension
 **Builds on:** Milestone 5.12 `IBSource` (which covers FX historical).

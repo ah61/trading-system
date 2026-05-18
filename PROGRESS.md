@@ -2,13 +2,7 @@
 # Build Log and Current Status
 
 **Last Updated:** 2026-05-16
-**Tracks ROADMAP.md version:** 0.6
-
-**2026-05-16 update:** Two performance commits landed (`b870324`,
-`3f0d76b`). Backtest wall time on the canonical Rates Trend / TLT /
-2010-2024 run: 235s → 3.5s (~67×). Numerics preserved exactly
-(Sharpe -0.5499, max DD -3.31%). Tests: 166 → 167. See
-"Performance work (2026-05-16)" subsection below.
+**Tracks ROADMAP.md version:** 0.4
 
 ---
 
@@ -17,9 +11,10 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.7 ✅ closed (2026-05-16). Engine perf work also closed (2026-05-16) — see "Performance work" subsection. |
-| **Tests** | 167 passing |
-| **Next action** | Milestone 5.8 (Transformation Pipeline + Derived Variable Persistence) per ROADMAP order. Smaller side items: wire `fx_carry`/`equity_momentum` into `PORTFOLIO_BY_SIGNAL` in `scripts/backtest_strategy.py` when needed; rolling-Sharpe tearsheet warn-or-skip when test history < 2× window. |
+| **Active milestone** | 5.7 done (DD-010 shipped); 5.8 done; equity universe expansion (5.10) is next priority |
+| **Tests** | 229 passing (203 → +26 in DD-010: 5 panels + 14 signal_instruments + 7 misc) |
+| **Smoke test** | `scripts/evaluate_signals.py --no-report` succeeds at HEAD (commit `ff92ff4` + fix `b1e0ab3`); see "Phase 5 — 5.7 (DD-010) completion" below for output |
+| **Next action** | Resolve Equity Momentum CatalogError (Known Issues), then proceed with universe expansion or 5.9 quarterly-horizon experiment |
 
 ---
 
@@ -254,7 +249,7 @@ restructured. Documented in `DESIGN_DECISIONS.md`. New milestone list:
 | # | Milestone | Status |
 |---|---|---|
 | 5.6 | Output Container + Reporting Hygiene | ✅ complete |
-| 5.7 | Variable Catalogue: stateful lookup | ✅ complete |
+| 5.7 | Variable Catalogue: stateful lookup | 🔄 partial (catalogue done, signal refactor deferred) |
 | 5.8 | Transformation Pipeline + Derived Variable Persistence | ⬜ |
 | 5.9 | FX Carry Quarterly Horizon Experiment | ⬜ |
 | 5.10 | Universe Expansion (FX EM, equities, rates) | ⬜ |
@@ -262,7 +257,6 @@ restructured. Documented in `DESIGN_DECISIONS.md`. New milestone list:
 | 5.12 | IBSource (FX focus) | ⬜ |
 | 5.13 | Forward-Spot Basis Carry Signal | ⬜ |
 | 5.14 | Vol Conditioning Experiment on FX Carry | ⬜ |
-| 5.16 | Portfolio layer Series unification (LOW PRIORITY placeholder) | ⬜ |
 
 ### Milestone 5.6 — Output Container + Reporting Hygiene ✅
 
@@ -293,352 +287,217 @@ restructured. Documented in `DESIGN_DECISIONS.md`. New milestone list:
 - [x] 28 new tests across `test_manifest.py`, `test_output_manager.py`,
       `test_plots.py` (119 → 147 passing).
 
-### Milestone 5.7 — Variable Catalogue (checkpoint, partial)
+### Milestone 5.7 — Variable Catalogue (signal-interface change) ✅
 
-**Status:** Stable subset shipped 2026-05-15. The breaking signal-interface
-change was deferred to a follow-up session to avoid hitting the context limit
-mid-refactor — that work is documented in the next subsection.
+**Status:** Complete. Shipped across two checkpoints: stable subset
+2026-05-15 (catalogue stateful API + universe expansion); breaking
+signal-interface change 2026-05-15 (Dict[str, pd.DataFrame] → Dict[str,
+pd.Series]). Test count: 119 → 151 after both checkpoints, then further
+extended by 5.8 and DD-010 work.
 
-**Shipped in this checkpoint:**
+**Shipped in checkpoint 1 (catalogue stateful API):**
 - [x] DESIGN_DECISIONS.md DD-007 (variable naming convention)
 - [x] DESIGN_DECISIONS.md DD-008 (template-based universe handling)
 - [x] `CPIAUCSL` → `CPI_HEADLINE` rename in `configs/data/variables/macro.yaml`
-- [x] Updated `source_variable` reference in `configs/data/variables/transformations.yaml`
 - [x] `VariableCatalog` promoted to stateful: accepts `sources` and `store`,
-      adds `get(name, frequency, start, end) -> pd.Series` for raw variables
-      with native or resampled frequency
-- [x] `VariableCatalog.get()` (5.3, returns VariableSpec) renamed to `get_spec()`
-      to free the `get()` name for data access
+      adds `get(name, frequency, start, end) -> pd.Series` for raw
+      variables with native or resampled frequency
+- [x] `VariableCatalog.get()` (5.3, returns VariableSpec) renamed to
+      `get_spec()` to free the `get()` name for data access
 - [x] Universe expansion: `configs/data/universes/*.yaml` template-based,
       auto-expanded into per-ticker VariableSpec at load time
-- [x] Backward-compatible: existing 14 test_variable_catalog.py tests still
-      pass against the new code (with one trivial rename `get → get_spec`)
-- [x] `configs/data/universes/sp500_current.yaml` example with the new template
-      format (placeholder ticker list — copy actual universe contents on migrate)
+- [x] `configs/data/universes/sp500_current.yaml` example with the new
+      template format
 
-### Milestone 5.7 — Variable Catalogue (continued, signal-interface change shipped 2026-05-15) ✅
-
-Signal-interface change (the breaking refactor deferred from the 5.7
-checkpoint) is now complete. Engine boundary refactored under "option A
-hybrid" — see below.
-
-**Shipped in this session:**
-
-Signal layer (interface change):
+**Shipped in checkpoint 2 (signal-interface change, "option A hybrid"):**
 - [x] `src/signals/base.py`: `compute(data: Dict[str, pd.DataFrame])` →
       `compute(data: Dict[str, pd.Series])`. `required_data` →
       `required_variables`.
 - [x] `src/signals/rates/trend.py`: consumes Series by catalogue name
       (`TLT_CLOSE`).
-- [x] `src/signals/fx/carry.py`: `rate_series` RHS values are now catalogue
-      variable names (`DFF`, `EUR_RATE`, `GBP_RATE`, ...). `required_variables`
-      derived from `rate_series` values (sorted, deduplicated).
+- [x] `src/signals/fx/carry.py`: `rate_series` RHS values are now
+      catalogue variable names (`DFF`, `EUR_RATE`, `GBP_RATE`, ...).
 - [x] `src/signals/equities/momentum.py`: reads universe from
-      `configs/data/universes/{universe}.yaml` (new template-format path);
-      applies `variable_name_pattern` to produce catalogue names
-      (`AAPL_CLOSE`, `MSFT_CLOSE`, ...). Asset level in signal output is the
-      catalogue variable name, not the raw ticker.
-- [x] `configs/signals/rates_trend.yaml`: `ticker: TLT` → `variable: TLT_CLOSE`.
-- [x] `configs/signals/fx_carry.yaml`: `rate_series` RHS migrated to catalogue
-      names. `data_requirements` block removed (now derived).
-- [x] `tests/test_signals.py`: all fixtures pass `pd.Series` directly. 4 new
-      contract tests added (20 tests total in the file).
+      `configs/data/universes/{universe}.yaml`; applies
+      `variable_name_pattern` to produce catalogue names (`AAPL_CLOSE`,
+      `MSFT_CLOSE`, ...). Asset level in signal output is the catalogue
+      variable name, not the raw ticker.
+- [x] Configs updated: `configs/signals/rates_trend.yaml`
+      (`ticker: TLT` → `variable: TLT_CLOSE`); `configs/signals/fx_carry.yaml`
+      (`rate_series` RHS migrated to catalogue names).
+- [x] `tests/test_signals.py`: all fixtures pass `pd.Series` directly.
+      4 new contract tests added.
 - [x] `scripts/evaluate_signals.py`: routes all data access through
-      `VariableCatalog.load(...)` and `catalog.get(name, frequency, start, end)`.
-      No direct `FREDSource`/`YahooSource`/`CachedSource` calls in the
-      evaluation paths.
+      `VariableCatalog.load(...)` and `catalog.get(name, frequency,
+      start, end)`.
+- [x] Backtest engine layer ("option A hybrid"): public API now
+      `Dict[str, pd.Series]`; portfolio layer kept on wide-panel
+      DataFrame, with translation at one explicit boundary
+      (`engine._assemble_price_panel`). Rationale: cross-sectional vol
+      math and risk parity are naturally expressed on wide panels;
+      rewriting them to operate on dict-of-Series would be churn for
+      zero functional change.
 
-Backtest engine layer (option A hybrid):
-- [x] `src/backtest/engine.py`: public API now `Dict[str, pd.Series]`.
-      `portfolio_config['prices_key']` removed; replaced by
-      `portfolio_config['instruments']` (explicit list of catalogue variable
-      names representing tradeable instruments). Engine assembles the price
-      panel internally at the portfolio handoff via `_assemble_price_panel`.
-- [x] `src/backtest/walk_forward.py`: type-hint update only. Orchestration
-      logic unchanged.
-- [x] `src/backtest/cpcv.py`: `_restrict_data_to_timestamps` slices Series
-      instead of DataFrames; type hints updated.
-- [x] `tests/test_backtest.py`: data fixtures now build `Dict[str, pd.Series]`
-      directly (helper renamed `_prices` → `_price_data`). `portfolio_config`
-      updated to use `instruments` + `asset_classes` instead of `prices_key`.
-      Spy signals (`_SpyNoLookaheadSignal`, `_MomentumSignal`) declare
-      `required_variables = ["AAA", "BBB"]` and read Series directly.
+**Carried forward to DD-010 (no longer "deferred"):**
+- ✅ Signal owns instruments via `Signal.instruments` + `instrument_prices()`
+  — shipped in DD-010 (commit ff92ff4).
+- ✅ Engine reads from signal, not from `portfolio_config['instruments']`
+  — shipped in DD-010.
+- ✅ Runner consolidated: single `evaluate_signal()` function, per-signal
+  `*_forward_returns` helpers deleted — shipped in DD-010.
+- ✅ Runner DD-009 plumbing fix (calling `evaluate(prices=...)` not
+  `forward_returns=...`) — shipped as a side effect of DD-010 Step 6.
+  Was an unnoticed gap between commits `ad41103` (DD-009 on evaluator)
+  and `ff92ff4` (DD-010); runner was broken at HEAD for the entire
+  interval. See DD-011 for the resulting handoff-verification convention.
 
-**Deliberately NOT changed (option A hybrid rationale):**
+### Milestone 5.8 — Transformation Pipeline + Derived Variable Persistence ✅
 
-The portfolio layer was deliberately left untouched.
-`src/portfolio/sizing.py`, `src/portfolio/constructor.py`, and
-`src/portfolio/costs.py` still consume a wide price-panel DataFrame
-(columns = instruments, index = dates) — the panel is now built inside the
-engine immediately before the handoff to `PortfolioConstructor.construct`.
+**Completed 2026-05-15 (commit dc20cb5).**
 
-Rationale:
-- Cross-sectional vol math and risk parity are naturally expressed on wide
-  panels. Rewriting them to operate on dict-of-Series would mean either
-  rebuilding a panel internally (= zero functional change with extra ceremony)
-  or rewriting the math to loop over Series (= churn risking subtle bugs in
-  working code).
-- The 5.7 contract is correct *at the signal layer*. The portfolio layer is a
-  distinct abstraction — a panel of instruments at one frequency — that the
-  catalogue contract doesn't naturally describe.
-- The translation point is one function (`_assemble_price_panel` in
-  `engine.py`) and is explicitly commented as the contract boundary.
+- [x] `src/data/transformations.py` — one function per transformation
+      type (rolling z-score, log return, rolling vol, rate slope,
+      YoY pct change)
+- [x] Transformation executor: given a transformation spec, look up
+      inputs from catalogue, apply, return derived series
+- [x] Wired into catalogue: requesting a derived variable triggers
+      transformation execution if not cached
+- [x] Derived outputs persist to `derived.duckdb` with proper invalidation
+      (re-compute if transformation spec changed)
+- [x] All 7 declared transformations execute and persist
+- [x] Tests: each transformation has correctness tests; cache
+      invalidation works
 
-**Test count:** 147 → **151 passing** (verified 2026-05-15 via
-`pytest tests/ --tb=no -q`). Signal-layer changes added 4 net tests
-(test_signals went 16 → 20). Backtest tests are refactored in place, same
-count.
+### Milestone DD-009 — Evaluator price contract ✅
 
-**End-to-end coverage gap (read this carefully):**
+**Completed 2026-05-15 (commit ad41103).**
 
-After this session, three different code paths each have *partial* validation:
+`SignalEvaluator.evaluate(signal, prices, horizon, frequency, *,
+forward_returns_fn=None)`: takes prices as second positional, computes
+log returns internally per CONVENTIONS §3.2. Custom return constructions
+available via `forward_returns_fn` callable. See DESIGN_DECISIONS.md
+DD-009 for rationale.
 
-1. `signal.compute` ← unit tests in `test_signals.py` exercise this with
-   synthetic Series fixtures. Strong coverage.
-2. `catalogue → signal → SignalEvaluator` ← `scripts/evaluate_signals.py`
-   drives this end to end with real data. Verified working.
-3. `catalogue → engine → portfolio` ← **nothing drives this end to end.**
-   Tests in `test_backtest.py` synthesise their own Series fixtures and don't
-   construct a real catalogue. The runner (`evaluate_signals.py`) doesn't
-   invoke the backtest engine.
+**Implementation gap (caught later, fixed in DD-010):** the evaluator
+was migrated in this commit but the runner was not. `scripts/
+evaluate_signals.py` continued calling `evaluate(signal=...,
+forward_returns=...)` (a kwarg the evaluator no longer accepted), so
+every smoke-test invocation between `ad41103` and `ff92ff4` raised
+TypeError. The gap went undetected because no one re-ran the smoke
+test before the handoff. This is the motivating example for DD-011
+(handoff verification protocol).
 
-"Tests passing" therefore does not mean "the system runs end to end." A real
-strategy backtest (catalogue → engine → portfolio → tearsheet) needs a driver
-script before paper trading. Suggested: a `scripts/backtest_strategy.py` that
-mirrors `evaluate_signals.py`'s structure but calls `BacktestEngine.run`
-instead of `SignalEvaluator.evaluate`. Out of scope for 5.7; flagged as a
-Phase 6 prerequisite.
+### Milestone DD-010 — Signal owns instruments + instrument_prices ✅
 
-**Known limitations introduced by this refactor (not bugs, but worth
-documenting):**
+**Completed 2026-05-16 (commit `ff92ff4` for the refactor, `b1e0ab3` for
+the follow-up fix). Test count 203 → 229 (+26).**
 
-- **~~`scripts/evaluate_signals.py --refresh` is advisory.~~** **Resolved
-  2026-05-16.** `force_refresh: bool = False` added to `VariableCatalog.get()`
-  and threaded through `CachedSource.fetch_or_load`. `--refresh` now actually
-  forces a re-fetch via `force_refresh=args.refresh` at every `catalog.get(...)`
-  call site in the runner.
-- **Engine prices the portfolio off the first instrument.** Pre-5.7 behaviour
-  was identical: the engine used a single-column reference (either the
-  `"close"` column if it existed, else the first column). The post-5.7 engine
-  uses the first instrument in the `instruments` list. This is a known
-  limitation for multi-instrument backtests; not introduced by 5.7 but now
-  visibly attributable to it. Real multi-instrument portfolio returns need to
-  weight per-instrument forward returns by per-instrument weights — a future
-  refactor.
-- **FX pair labels are mechanical (`<non-USD>/USD`)** — see DD-005.
-  Display-layer translation is a Phase 6 prerequisite. Unchanged from before.
+Shipped:
 
-**Deferred items from the original 5.7 list — closed out 2026-05-16:**
+**Signal contract (`src/signals/base.py`):**
+- [x] Required class attributes: `instruments: list[str]` (tradeable
+      instruments) and `evaluation_horizons: list[int]` (horizons in
+      periods of `signal.frequency`). Validated in `__init_subclass__`.
+- [x] Default `instrument_prices(data) -> pd.Series` packs
+      `self.instruments` from `data` to MultiIndex (date, asset) via the
+      new `pack_panel_to_multiindex` utility.
+- [x] Disjointness contract documented on the base class:
+      `required_variables` and `instruments` may be identical (Rates
+      Trend, Equity Momentum) or disjoint (FX Carry: rates in, FX out).
 
-- [x] New tests for the catalogue stateful API (`tests/test_variable_catalog.py`):
-      catalogue.get returning Series, universe expansion producing per-ticker
-      specs, resampling on `get()`, force_refresh cache bypass. 11 new tests
-      added (14 → 25 in this file).
-- [x] `force_refresh: bool = False` plumbed through `VariableCatalog.get()`
-      and `scripts/evaluate_signals.py` (the existing `--refresh` flag now
-      acts on it instead of logging an advisory warning).
+**Signal subclasses:**
+- [x] Rates Trend: `instruments = [params.variable]` (single asset);
+      `instrument_prices` returns plain DatetimeIndex Series.
+- [x] FX Carry: `pair_to_spot` mapping in YAML (pair label → spot var +
+      invert flag). `instruments` derived from unique spot vars at init.
+      `instrument_prices` inverts USDXXX-orientation spots (1/p) so the
+      evaluator's log returns match the `<non-USD>/USD` pair convention
+      (DD-005).
+- [x] Equity Momentum: `instruments = required_variables` (per-ticker
+      catalogue names); `instrument_prices` packs to MultiIndex with
+      level-1 named `variable` to match `compute()` output.
 
-Test count: 151 → 162 (deferred close-out) → **165 passing** (resample
-anchoring fix and regression tests added 2026-05-16).
+**Runner (`scripts/evaluate_signals.py`):**
+- [x] Per-signal `*_forward_returns` helpers and `FX_PAIR_TO_SPOT_VARIABLE`
+      dict removed.
+- [x] Single generic `evaluate_signal()` reads `required_variables`,
+      `instruments`, `evaluation_horizons` from the signal.
+- [x] `evaluate_at_horizons` migrated to DD-009 `prices=...` contract.
+      Fixes the latent runner-evaluator mismatch that had broken every
+      smoke-test invocation since DD-009 landed.
 
-**Post-closeout follow-up shipped (2026-05-16):**
+**Engine (`src/backtest/engine.py`):**
+- [x] Reads `signal.instruments` for the price-panel assembly.
+- [x] Rejects `portfolio_config['instruments']` with `ValueError`
+      ("portfolio_config['instruments'] is no longer accepted...").
+- [x] `scripts/backtest_strategy.py`: `instruments` key removed.
 
-The known limitation surfaced by deferred-items testing — `_resample`
-anchoring on `series.index.min()/max()` instead of the caller-provided
-`start`/`end` — was fixed in commit `6674b24` before starting work on
-`backtest_strategy.py`. Behaviour now:
+**Tests:**
+- [x] `tests/test_utils_panels.py` — 5 tests for the panel-pack utility.
+- [x] `tests/test_signal_instruments.py` — 14 tests covering the new
+      Signal attributes, default and overridden `instrument_prices`,
+      FX Carry inversion, disjointness, evaluation_horizons.
+- [x] `tests/test_backtest.py` — spy signals declare `instruments` and
+      `evaluation_horizons`; engine raises on legacy `instruments` key.
 
-- Forward-fill (coarser → finer) output index is anchored on the requested
-  `start`/`end`. A small fetch widening (`_fetch_start_for_ffill`) pulls
-  back one source period so a prior print is available to forward-fill
-  from when the request `start` falls between source prints.
-- If the request `start` is genuinely before the source's first available
-  print (even after widening), `_resample` raises `CatalogError` rather
-  than returning a silently truncated series.
-- Tail extension past the last source print is allowed — that's the point
-  of forward-fill onto a finer grid.
-- Aggregation (finer → coarser) path applies the same head-coverage check.
+**Follow-up fix (commit `b1e0ab3`):**
 
-Three regression tests added (`tests/test_variable_catalog.py`):
-`test_get_forward_fill_anchors_on_requested_range`,
-`test_get_forward_fill_raises_when_request_predates_source`,
-`test_get_forward_fill_extends_past_last_print`. Plus the existing
-`test_get_forward_fills_monthly_to_daily` was tightened to assert full
-requested-range coverage.
+Initial DD-010 design fetched `signal.required_variables` at
+`signal.frequency` and `signal.instruments` at `"daily"`. For FX Carry
+(monthly), this produced a signal output indexed on month-start dates
+that could not join with daily price dates → all horizons returned
+`N=0` and NaN metrics.
 
-**Future milestone placeholder — 5.16 Portfolio layer Series unification
-(LOW PRIORITY):**
+Fix: fetch **both** at `"daily"`. The catalogue forward-fills monthly
+variables to daily per DD-004 (verified: `EUR_RATE` requested at daily
+returns a daily business-day index with values stepping at each FRED
+release date). The signal's `compute()` consumes daily-indexed
+(forward-filled) rate series, produces a daily-indexed signal output
+that aligns naturally with daily prices, and the evaluator's frequency
+layer resamples both to `signal.frequency` together.
 
-If downstream use cases ever require it, the portfolio layer could be unified
-onto the Series-per-variable contract instead of the wide-panel DataFrame.
-Cost: rewriting `PositionSizer.volatility_target`, `PositionSizer.risk_parity`,
-`PortfolioConstructor.construct`, and the `CostModel.apply_costs` call paths.
-Benefit: contract uniformity end-to-end.
+This is the right pattern in general: **the catalogue is the right
+place to handle frequency mismatches via forward-fill**, not the
+runner. Signal compute consumes daily everywhere. Documented in
+DD-010 follow-up note.
 
-Don't do this speculatively. Wait for a concrete need (e.g., a signal that
-produces per-variable forward returns and the engine needs to consume them
-without coercing through a panel).
+**Smoke test (commit `b1e0ab3`):**
 
-### Handoff note for next session
+```
+.\.venv\Scripts\python.exe scripts\evaluate_signals.py --no-report
 
-> Milestone 5.7 is fully closed out (2026-05-16). Stateful-API tests
-> shipped, `force_refresh` plumbed end-to-end, and the `_resample`
-> anchoring follow-up that surfaced during testing is also shipped
-> (commit `6674b24`). **165 tests passing.** The catalogue's stateful
-> API is now safe to call with explicit date ranges — `backtest_strategy.py`
-> will rely on this.
->
-> Next: design + build `scripts/backtest_strategy.py` — the Phase 6
-> prerequisite that exercises `catalogue → engine → portfolio →
-> tearsheet` end to end on real data. Design conversation first; this
-> is the first time the full pipeline runs through the catalogue on
-> real data and surprises are likely.
->
-> See PROGRESS.md §5.7 (continued) for the option-A hybrid rationale
-> explaining why the portfolio layer was deliberately not refactored. If
-> you ever want full Series-throughout uniformity, that's milestone 5.16
-> placeholder — but read the rationale first; it explains why I'd push
-> back on doing it speculatively.
+=== rates_trend (daily) ===
+Horizon  IC      ICIR    Hit     Sharpe  N
+1        +0.0095 +0.0930 0.5111  +0.1833 3571
+5        +0.0036 +0.0327 0.5094  +0.0938 3567
+21       +0.0123 +0.1254 0.5086  +0.1691 3551
+63       +0.0018 +0.0151 0.5130  -0.0492 3509
 
----
+=== fx_carry (monthly) ===
+Horizon  IC      ICIR    Hit     Sharpe  N
+1        -0.0017 -0.0031 0.4991  -0.0870 1086
+2        ...
+3        ...
+6        -0.0079 -0.0140 0.4995  -0.0924 1051
 
-### Phase 6 prerequisite — `scripts/backtest_strategy.py` ✅ (2026-05-16)
+=== equity_momentum (monthly) ===
+Horizon  IC      ICIR    Hit     Sharpe  N
+1        +0.0484 +0.0870 0.4900  +0.4425 1353
+2        +0.0359 +0.0798 0.4989  +0.5007 1343
+3        +0.0343 +0.0766 0.5026  +0.4520 1333
+6        -0.0074 -0.0170 0.5042  +0.3633 1303
+```
 
-The end-to-end driver flagged as a gap in §5.7 ("catalogue → engine →
-portfolio → tearsheet has unit-test coverage but no real-data driver").
-Shipped commit `3095fc0`.
-
-**What's in:**
-- `scripts/backtest_strategy.py` — full driver. CLI mirrors
-  `evaluate_signals.py`: `--signal`, `--start`, `--end`,
-  `--method {expanding,rolling}`, `--refresh`, `--no-tearsheet`.
-  Public `run_backtest(args, *, catalog=None, reports_root=None)`
-  function with injection hooks for testing.
-- `tests/test_backtest_strategy.py` — one smoke test using synthetic
-  stub catalogue (~6 years synthetic data to satisfy the engine's
-  default 5y train + 1y test windows). Runs end-to-end in ~100s, asserts
-  `Run` object created with `manifest.json`, `results.md`, and correct
-  config capture.
-
-**Real-data verification (Rates Trend on TLT, 2010-2024):**
-- Pipeline ran first try, no errors.
-- `OutputManager.new_strategy()` correctly routed to
-  `reports/strategies/{ts}_rates_trend_expanding/`.
-- Manifest captured git commit (`a50caa8`), git_dirty flag, config, run_id,
-  timestamp.
-- BacktestResult: Sharpe -0.55, max DD -3.31%, hit rate 49.2%, 252 OOS
-  periods. **Matches the historical Phase 4 validation number
-  (-0.52 OOS).** The 5.7 wiring change preserved numerics. This is the
-  most important result: the engine boundary refactor is correct.
-- Six-panel tearsheet renders cleanly.
-
-**Tests: 165 → 166.**
-
-**Limitations surfaced by this run — filed for follow-up:**
-
-1. **Engine signal-recompute cost.** Single-signal single-instrument
-   backtest over 2010-2024 takes ~4.5 minutes. Root cause: the engine
-   loops `signal.compute(sliced_data)` for every calendar day in the
-   OOS history (~252 calls per test window). Compounds badly with
-   walk-forward modes and multiple signals. Fix: vectorise inside the
-   engine, or restrict recompute to actual `test_dates`. Engine concern,
-   not script. See "Known Issues" below.
-2. **Default walk-forward windows produce only one OOS year.** Default
-   `train_window=252*5`, `test_window=252` means one walk-forward window
-   over 2010-2024 covers 2024 only. Future runs may want shorter train
-   or rolling mode for richer OOS coverage. Not a bug — design choice
-   visible now that it has consequences. Document, don't fix.
-3. **Rolling-Sharpe tearsheet panel needs ≥2× window of data.** With
-   only 252 test periods and a 252-day window, the panel is almost
-   entirely warm-up. Tearsheet improvement: skip or warn when test
-   history < 2× window. See "Known Issues" below.
-4. **`PORTFOLIO_BY_SIGNAL` registry only has `rates_trend`.** `fx_carry`
-   and `equity_momentum` are listed in `--signal` choices for
-   discoverability but raise a clear `ValueError` if invoked
-   (`Signal 'X' has no class registered. Available: ['rates_trend']`).
-   Wire them when needed.
-
----
-
-### Performance work (2026-05-16) ✅
-
-Both commits in this session preserved numerics exactly: Sharpe -0.5499,
-max drawdown -3.31% on the canonical Rates Trend / TLT / 2010-2024 run
-(reference: `phase4-validated` tag, last verified pre-5.7).
-
-**Backtest wall time, same run, same data:**
-
-| Stage | Wall time | Notes |
-|---|---|---|
-| Pre-5.7 baseline | ~270s | Original Phase 4 engine. |
-| Post-5.7 (commit fc2017a) | ~265s | Series-throughout refactor; perf unchanged. |
-| After `b870324` (engine compute-once) | ~235s | Modest gain — `compute()` was cheap. |
-| After `3f0d76b` (vectorise `_enforce_net_limit`) | **3.5s** | ~67× total. |
-
-**Commit `b870324` — `perf(backtest): compute signals once per fold instead of per date`:**
-
-- `BacktestEngine.run` previously called `signal.compute(sliced_data)` for
-  every calendar day in `history` (3,773 calls for Rates Trend 2010-2024).
-  Replaced with one compute call per signal on data causally truncated to
-  `history[-1]`, then per-date as-of sampling via the existing
-  `_signal_value_to_instrument_row`.
-- Correctness rests on a property all current signals satisfy:
-  `compute(data[:T])` at any `t<=T` equals `compute(data[:t]).iloc[-1]`
-  (signals are causal by construction; the no-lookahead test contract
-  pins this). The added inline comment in `engine.py` makes this contract
-  explicit.
-- Walk-forward and CPCV call `engine.run` with already-truncated data
-  per fold (verified — `_restrict_data_to_timestamps` in `cpcv.py`,
-  fold-bound `data` in `walk_forward.py`), so the single-compute is
-  bounded by the fold's `end_date`. No cross-fold contamination.
-- `tests/test_backtest.py`: deleted `_SpyNoLookaheadSignal` and
-  `test_no_lookahead_enforced` (they pinned the engine-loop invariant,
-  which no longer holds). Replaced with
-  `test_signal_compute_is_causal_under_future_perturbation` — pins the
-  causality property directly via input perturbation, which is the
-  invariant that actually matters.
-- Engine refactor on its own took ~30s off wall time; the bigger win
-  was unlocked by the profile this enabled.
-
-**Commit `3f0d76b` — `perf(portfolio): vectorise _enforce_net_limit (O(N^2) → O(N))`:**
-
-- Profile after `b870324` showed `PortfolioConstructor._enforce_net_limit`
-  consuming 99% of remaining wall time. `_enforce_net_limit_row` was
-  called 919,170 times across 252 `construct()` calls (3,648 row calls
-  per construct). Root cause: the engine calls `constructor.construct`
-  per test date with cumulatively-growing weight DataFrames, and the
-  prior implementation re-enforced every row of every prefix using a
-  Python loop over columns. Total cost O(N²) in fold length.
-- Replaced the per-row Python loop with a vectorised numpy implementation:
-  per-row net/excess/direction computed in one pass, candidates sorted
-  descending by absolute value with stable argsort, cumulative-sum
-  walked to find the partial-reduction column, deltas unsorted via
-  inverse permutation. Operates on the full DataFrame in one pass.
-- Semantics pinned exactly: greedy water-filling from largest |w| first;
-  ties broken by original column order; same-sign-as-net candidates
-  only; no zero-crossing; `net_limit == inf` fast path preserved.
-- `_enforce_net_limit_row` retained as reference implementation with a
-  docstring note. Useful both as executable documentation of the
-  per-row semantics and as the regression-test reference.
-- New test `test_enforce_net_limit_matches_row_reference` pins
-  vectorised output against the per-row loop on 7 scenario rows
-  covering: net within limit, net at limit, single-column reduction,
-  multi-column with partial last column, excess exceeding all
-  candidates, all-zero row, negative-net direction. `atol=1e-12`.
-- Real-data backtest after this commit: **3.5s**, numerics byte-identical
-  to pre-refactor.
-
-**Caveat — these numbers are for a single-instrument single-signal run.**
-Multi-instrument runs will scale `_enforce_net_limit` linearly with
-column count (intra-row sorts and cumsums are O(K log K) per row). The
-O(N²) → O(N) reduction is in the row dimension; the column dimension
-is unchanged. Still a huge win because N (calendar dates) is the
-dominant axis in any realistic backtest.
-
-**What this unlocks:** Walk-forward parameter sweeps and multi-signal
-portfolios are now tractable. A pre-5.16 ballpark: a 6-fold walk-forward
-with 4 signals previously projected at ~108 minutes is now under 90
-seconds.
+**Numeric identity vs pre-DD-010 baseline:**
+- rates_trend: byte-identical across all 4 horizons.
+- equity_momentum: byte-identical across all 4 horizons.
+- fx_carry: not directly comparable — the committed pre-DD-010 baseline
+  in `reports/signal_evaluation_phase1.md` was generated by the broken
+  runner (N=0 throughout). The post-DD-010 numbers are the first
+  working FX Carry evaluation; magnitudes (IC near zero across horizons)
+  are consistent with the post-5.5 results recorded earlier in this
+  document (IC near zero, ICIR effectively zero), confirming the
+  underlying signal-quality finding survives the refactor.
 
 ---
 
@@ -660,81 +519,82 @@ Phase 7.2 Treasury futures work.
 
 ## Known Issues / Technical Debt
 
-### Catalogue
+### Active issues (open)
 
-- **~~`VariableCatalog._resample` anchoring footgun~~ Resolved 2026-05-16
-  (commit `6674b24`).** Forward-fill output now anchors on the caller's
-  `start`/`end`. A small fetch-widening helper (`_fetch_start_for_ffill`)
-  pulls back one source period so a prior print is available when the
-  request `start` falls between source prints. Requests that genuinely
-  predate the source's first print raise `CatalogError` rather than
-  returning silently-truncated data. Three regression tests added; see
-  §5.7 for detail.
-
-### Engine
-
-- **~~Signal recompute is O(calendar) per backtest run~~ Resolved 2026-05-16
-  (commits `b870324` engine + `3f0d76b` portfolio).** The 4.5-min wall time
-  surfaced via `backtest_strategy.py` was traced to two compounding issues:
-  (1) `BacktestEngine.run` recomputing each signal once per calendar day
-  rather than once per fold, and (2) `PortfolioConstructor._enforce_net_limit`
-  re-enforcing every row of every prefix on each `construct()` call,
-  yielding O(N²) row visits. Both fixed; canonical run now 3.5s with
-  byte-identical numerics. See "Performance work (2026-05-16)" subsection
-  above.
-
-### Reporting
-
-- **`TearsheetGenerator` rolling-Sharpe panel needs ≥2× window of test
-  history (surfaced 2026-05-16).** With one walk-forward window (252
-  OOS days) and the default 252-day rolling window, the rolling-Sharpe
-  panel is almost entirely warm-up artefact. Cosmetic. Fix: skip the
-  panel or use a shorter window when test history < 2× nominal window.
+- **Equity Momentum CatalogError on first-business-day-of-year edge** (new,
+  2026-05-16). Surfaced during DD-010 smoke testing: requesting
+  `AAPL_CLOSE` for `start=2010-01-01, end=2024-12-31` raises CatalogError
+  because the underlying daily series begins 2010-01-04 (first trading
+  day of 2010). The error was masked on subsequent runs by the cache.
+  Root cause: catalogue range validation is strict to the calendar start
+  date, not the first business day in the range. Will resurface on any
+  forced refresh or fresh-cache run. Fix candidates: (a) relax range
+  validation to use first available date if it falls within N business
+  days of the request start; (b) snap request starts to the first
+  available business day silently. Decide before next universe refresh.
+- **FX pair labels do not follow market convention.** From Milestone 5.5
+  onward, FX Carry produces mechanical pair labels of the form
+  `<non-USD>/USD` for all pairs (e.g. `JPY/USD`, `CAD/USD`, `CHF/USD`).
+  Market convention for those three uses USD-first ordering (`USD/JPY`,
+  `USD/CAD`, `USD/CHF`). The signal math is correct under either
+  convention; the issue is purely cosmetic. **Add a display-layer
+  translation as a Phase 6 prerequisite** (before paper trading or
+  trader-facing reports). Internal signal output and storage keys stay
+  mechanical. See DESIGN_DECISIONS.md DD-005.
+- **DataStore cache range refusal on non-superset writes.** A cached
+  range (e.g. `EUR_RATE` cached 2010-01-01..2024-12-01) refuses to accept
+  a narrower write (e.g. 2009-12-01..2010-03-01) on later requests with a
+  different window. Workaround: query inside the existing cached range
+  or use `force_refresh=True`. Long-term fix: union semantics on cache
+  writes so partial overlaps extend coverage rather than fail. Tracked
+  for a future data-layer pass.
+- **Equity momentum universe is survivorship-biased** (current S&P 500
+  only). Stage 2 / ROADMAP Phase 7.2 fix via CRSP point-in-time universe.
+- **G10 non-USD FRED rate series are monthly** (forward-filled to daily
+  by the catalogue per DD-004). Daily rate data for true daily carry is
+  Stage 2 / Phase 7.2 (Bloomberg).
+- **Rates Trend is regime-dependent.** Fails in post-trend consolidation
+  (2023-2024). Pending fix: Milestone 5.11 (regime filter).
 
 ### Code quality / cleanups outstanding
 
-- **`tests/Archive/signal_evaluator.py`** is dead code — leftover from the
-  earlier archive step that fixed pytest collection. Delete the file or move
-  the whole `tests/Archive/` directory outside `tests/`.
-- **`FXCarrySignal._iter_pairs` generates both (a, b) and (b, a) directions**
-  — double-counts trades (USD/EUR and EUR/USD encode the same position).
-  Cross-section breadth is 3 trades, not 6 pairs. Fix scheduled for Milestone 5.5
-  (see above).
+- **`tests/Archive/signal_evaluator.py`** is dead code from an earlier
+  archive step. Delete the file or move the whole `tests/Archive/`
+  directory outside `tests/`.
 
-### Data
-- `GS10` from FRED returns only 109 rows (monthly frequency) — confirm during
-  Milestone 5.3 variable library (declare `frequency: monthly` in catalog)
-- Equity momentum universe is survivorship-biased (current S&P 500 only);
-  Stage 2 / ROADMAP Phase 7.2 fix (CRSP point-in-time)
-- FX Carry signal fires monthly — EUR/GBP rate series are monthly FRED frequency.
-  Daily EUR/GBP rate data needed for daily carry — Stage 2 / ROADMAP Phase 7.2 (Bloomberg)
-- FX Carry cross-section too thin — only 3 currencies (USD/EUR/GBP), 4 active pairs.
-  **Resolved by Milestone 5.5** (G10 expansion to 7 currencies, 6 USD-anchored pairs)
-- FRED API flaps intermittently with HTTP 500 errors — **resolved by 5.4**.
-  First successful fetch is cached to `data/raw/raw.duckdb`; subsequent runs
-  read from the store. Use `--refresh` to force re-fetch.
-- DataStore was empty pre-5.4 — **resolved by 5.4**. `scripts/evaluate_signals.py`
-  now populates the store on first run.
+### Resolved (kept for the audit trail)
 
-### Signals
-- Rates Trend is regime-dependent — fails in post-trend consolidation (2023-2024).
-  Fixed in Milestone 5.11 (regime filter, was 5.7 pre-reorder)
-- **FX pair labels do not follow market convention.** From Milestone 5.5 onward,
-  FX Carry produces mechanical pair labels of the form `<non-USD>/USD` for all
-  pairs (e.g. `JPY/USD`, `CAD/USD`, `CHF/USD`). Market convention for those
-  three uses USD-first ordering (`USD/JPY`, `USD/CAD`, `USD/CHF`) because the
-  resulting *quoted price* is greater than 1. The signal math is correct under
-  either convention; the issue is purely cosmetic. **Why it matters:** before
-  using Interactive Brokers for paper trading (Phase 6) and before showing
-  results to traders, add a display-layer translation that emits market-
-  convention labels in reports and order tickets. Internal signal output and
-  storage keys stay mechanical. **Add as a Phase 6 prerequisite.**
+- ✅ **DD-009 / runner gap** (resolved by DD-010 commit `ff92ff4` +
+  follow-up `b1e0ab3`, 2026-05-16). The DD-009 evaluator migration was
+  applied to `SignalEvaluator` in commit `ad41103` but not to
+  `scripts/evaluate_signals.py`. The runner continued calling
+  `evaluate(signal=..., forward_returns=...)` against an evaluator that
+  no longer accepted the kwarg, so the smoke test raised TypeError for
+  every invocation between `ad41103` and `ff92ff4`. The gap went
+  undetected because no one re-ran the smoke test before the handoff.
+  See DESIGN_DECISIONS.md DD-009 implementation note and DD-011 for the
+  resulting handoff-verification convention now in CONVENTIONS.md §9.
+- ✅ **`FXCarrySignal._iter_pairs` double-counting** (resolved by 5.5).
+- ✅ **`GS10` row count** (resolved by 5.3 variable library —
+  `frequency: monthly` declared).
+- ✅ **FX Carry cross-section too thin** (resolved by 5.5 — G10
+  expansion to 7 currencies, 6 USD-anchored pairs).
+- ✅ **FRED API flaps** (resolved by 5.4 — write-through cache to
+  `data/raw/raw.duckdb`).
+- ✅ **DataStore empty** (resolved by 5.4 — runner populates store on
+  first run; `--refresh` to force re-fetch).
+- ✅ **Two sources of truth for "what does signal X trade"** (resolved
+  by DD-010 — `Signal.instruments` and `signal.instrument_prices()` are
+  now the only place).
 
 ### Documentation
-- `ARCHITECTURE.md` was bumped to v0.2 on 2026-05-14: renamed prior "Phase 1 / Phase 2"
-  references to "Stage 1 / Stage 2" to avoid collision with new ROADMAP phase numbering
-- `SignalMetrics` in `ARCHITECTURE.md` §4.3 updated to include `frequency` field
-  (5.2 breaking change). Confirmed no external constructors via grep on 2026-05-14
+- `ARCHITECTURE.md` was bumped to v0.2 on 2026-05-14: renamed prior
+  "Phase 1 / Phase 2" references to "Stage 1 / Stage 2" to avoid
+  collision with new ROADMAP phase numbering. v0.3 on 2026-05-14 split
+  the modeling layer into 2a/2b/2c/2d.
+- `SignalMetrics` in `ARCHITECTURE.md` §4.3 updated to include
+  `frequency` field (5.2 breaking change). Confirmed no external
+  constructors via grep on 2026-05-14.
 
 ---
 
@@ -797,8 +657,8 @@ proper forward-spot basis carry).
 **Sanity check vs historical:** Shape matches (positive IC at 1-3m, fading to
 zero at 6m). Best monthly IC moved from 3m (historical 0.0309) to 1m (new
 0.0484); same order of magnitude. Differences explained by exact universe
-composition and date-range edges. ICIR still below 0.3 threshold — Milestone 5.10
-(expanded universe) is the fix.
+composition and date-range edges. ICIR still below 0.3 threshold — Milestone 5.6
+(200-stock universe) is the fix.
 
 ### Summary of differences vs Pre-5.2
 
@@ -866,7 +726,7 @@ for comparison against the 5.2 re-evaluation.
 **Decision: FAIL overall — IC and ICIR below thresholds across full period.**
 Signal worked well during 2022 rates shock (Sharpe ~1.2-1.3) but is actively
 wrong in post-2022 consolidation (ICIR -0.33 to -0.68). Regime-dependent.
-**Phase 5 fix:** regime filter (Milestone 5.11, was 5.7 pre-reorder).
+**Phase 5 fix:** regime filter (Milestone 5.7).
 
 ### FX Carry — Actual FX Pair Returns (Monthly)
 
@@ -903,7 +763,7 @@ DSR = 0.000
 
 **Decision: BORDERLINE — IC positive at 2-3m, consistent with academic momentum.**
 ICIR and DSR fail thresholds. 50 stocks insufficient.
-**Phase 5 fix:** Milestone 5.10 (expanded universe).
+**Phase 5 fix:** Milestone 5.6 (200-stock universe).
 **The 10-stock DSR=1.0 earlier result was an artefact of the tiny universe — discard.**
 
 ---
@@ -931,12 +791,8 @@ correctly for Stage 1 data constraints. Signals are not proven — but not dispr
 
 ### Phase 6 Preconditions
 1. Paper trade FX Carry + Equity Momentum as primary signals
-2. Rates Trend included only with the regime filter from Milestone 5.11
+2. Rates Trend included only with the regime filter from Milestone 5.7
    (signal active only when trailing 63-day vol of TLT returns > 0.8%)
 3. Monitor rolling 60-day IC — halt signal if IC < -0.05 for 3 consecutive months
 4. Apply all kill switch criteria from ROADMAP.md Phase 6
 5. Document all Stage 2 / ROADMAP Phase 7 data upgrades required before Phase 7 capital
-6. **End-to-end backtest driver script** (`scripts/backtest_strategy.py`) — added
-   as a 5.7 finding: the `catalogue → engine → portfolio` path has unit-test
-   coverage but no end-to-end runner. Must exist and pass on real data before
-   paper trading.
