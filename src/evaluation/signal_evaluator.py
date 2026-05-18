@@ -36,7 +36,7 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 
-Frequency = Literal["daily", "weekly", "monthly"]
+Frequency = Literal["daily", "weekly", "monthly", "quarterly"]
 
 
 class ForwardReturnsFn(Protocol):
@@ -66,6 +66,7 @@ _FREQUENCY_TABLE: dict[str, tuple[int, str]] = {
     "daily": (252, "B"),       # business day; primarily a no-op pass-through
     "weekly": (52, "W-FRI"),   # week ending Friday
     "monthly": (12, "MS"),     # month start
+    "quarterly": (4, "QS"),  # quarter start; 4 periods per year
 }
 
 # Time-equivalent rolling IC window (~one quarter) at each frequency.
@@ -74,6 +75,7 @@ _ROLLING_IC_WINDOW: dict[str, int] = {
     "daily": 63,
     "weekly": 13,
     "monthly": 3,
+    "quarterly": 1,  # quarterly: 1 period = ~one quarter; rolling IC is degenerate by design
 }
 
 
@@ -92,7 +94,7 @@ class SignalMetrics:
         decay_halflife: Lags until rolling-IC autocorrelation drops to 0.5.
         n_observations: Number of paired (signal, forward-return) observations.
         forward_return_horizon: Horizon in periods (at ``frequency``).
-        frequency: Evaluation frequency. One of {'daily', 'weekly', 'monthly'}.
+        frequency: Evaluation frequency. One of {'daily', 'weekly', 'monthly', 'quarterly'}.
     """
 
     ic_mean: float
@@ -450,7 +452,7 @@ class SignalEvaluator:
             horizon: Forward horizon in *periods at* ``frequency``. For
                 ``frequency='monthly'`` and ``horizon=3``, evaluates predictive
                 power over the next 3 months.
-            frequency: 'daily' (default), 'weekly', or 'monthly'. Both signal
+            frequency: 'daily' (default), 'weekly', 'monthly', or 'quarterly'. Both signal
                 and returns are resampled to this frequency before evaluation.
             forward_returns_fn: Optional override at the price-to-returns
                 boundary. When provided, replaces the internal log-return

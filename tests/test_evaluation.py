@@ -314,6 +314,22 @@ def _build_monthly_signal_daily_indexed(n_days: int = 500) -> pd.Series:
     return s
 
 
+def _build_quarterly_signal_daily_indexed(n_days: int = 500) -> pd.Series:
+    """Signal non-zero on the first business day of each calendar quarter.
+
+    Daily-indexed input for quarterly ``evaluate(..., frequency='quarterly')``.
+    ~500 business days yields ~12-20 quarterly periods after resampling.
+    """
+    idx = _daily_dates(n_days)
+    s = pd.Series(0.0, index=idx)
+    quarters = pd.Series(idx.year * 10 + idx.quarter, index=idx)
+    is_first_in_quarter = quarters != quarters.shift(1)
+    fire_dates = idx[is_first_in_quarter]
+    for i, d in enumerate(fire_dates):
+        s.loc[d] = 1.0 if i % 2 == 0 else -1.0
+    return s
+
+
 def _build_daily_log_returns(n_days: int = 500, seed: int = 0) -> pd.Series:
     rng = np.random.default_rng(seed)
     idx = _daily_dates(n_days)
@@ -345,6 +361,15 @@ def test_signal_evaluator_evaluate_accepts_frequency_monthly() -> None:
     m = SignalEvaluator().evaluate(sig, prices, horizon=3, frequency="monthly")
     assert m.frequency == "monthly"
     assert m.forward_return_horizon == 3
+
+
+def test_signal_evaluator_evaluate_accepts_frequency_quarterly() -> None:
+    sig = _build_quarterly_signal_daily_indexed(n_days=500)
+    ret = _build_daily_log_returns(n_days=500, seed=42)
+    prices = _prices_from_log_returns(ret)
+    m = SignalEvaluator().evaluate(sig, prices, horizon=1, frequency="quarterly")
+    assert m.frequency == "quarterly"
+    assert m.forward_return_horizon == 1
 
 
 def test_signal_evaluator_evaluate_rejects_unknown_frequency() -> None:
@@ -429,6 +454,32 @@ def test_resample_log_returns_sums_within_period() -> None:
     assert weekly.iloc[0] == pytest.approx(0.05)
 
 
+def test_resample_signal_quarterly_first_nonzero_in_period() -> None:
+    """Quarterly resample takes the first non-zero value in each quarter."""
+    from src.evaluation.signal_evaluator import _resample_signal
+
+    # ~6 months of business days spanning Q1 and Q2 2024.
+    idx = pd.date_range("2024-01-01", periods=130, freq="B", tz="UTC")
+    s = pd.Series(0.0, index=idx)
+    # Q1: first non-zero on the third business day (0.7); later 0.3 ignored.
+    s.iloc[2] = 0.7
+    s.iloc[20] = 0.3
+
+    quarterly = _resample_signal(s, "quarterly")
+    assert quarterly.iloc[0] == pytest.approx(0.7)
+
+
+def test_resample_log_returns_quarterly_sums_within_period() -> None:
+    """Quarterly log-return resample sums daily log returns within the quarter."""
+    from src.evaluation.signal_evaluator import _resample_log_returns
+
+    idx = pd.date_range("2024-01-01", periods=63, freq="B", tz="UTC")
+    r = pd.Series(0.05 / 63.0, index=idx)
+    quarterly = _resample_log_returns(r, "quarterly")
+    assert len(quarterly) == 1
+    assert quarterly.iloc[0] == pytest.approx(0.05)
+
+
 def test_resample_daily_is_passthrough() -> None:
     """frequency='daily' must not alter the input."""
     from src.evaluation.signal_evaluator import _resample_log_returns, _resample_signal
@@ -471,6 +522,29 @@ def test_signal_sharpe_uses_correct_annualisation_per_frequency() -> None:
     assert m_daily.frequency == "daily"
     assert m_weekly.frequency == "weekly"
     assert m_monthly.frequency == "monthly"
+
+
+def test_signal_sharpe_uses_quarterly_annualisation() -> None:
+    """Quarterly evaluation annualises with sqrt(4) via _FREQUENCY_TABLE."""
+    n = 1000
+    idx = _daily_dates(n)
+    rng = np.random.default_rng(321)
+    daily_ret = pd.Series(rng.normal(loc=0.0005, scale=0.01, size=n), index=idx)
+    sig = pd.Series(1.0, index=idx)
+    prices = _prices_from_log_returns(daily_ret)
+
+    m = SignalEvaluator().evaluate(sig, prices, horizon=1, frequency="quarterly")
+    assert m.frequency == "quarterly"
+    assert np.isfinite(m.signal_sharpe)
+
+
+def test_quarterly_icir_is_nan_by_design() -> None:
+    """ICIR is NaN at quarterly frequency: _ROLLING_IC_WINDOW['quarterly'] == 1."""
+    sig = _build_quarterly_signal_daily_indexed(n_days=500)
+    ret = _build_daily_log_returns(n_days=500, seed=11)
+    prices = _prices_from_log_returns(ret)
+    m = SignalEvaluator().evaluate(sig, prices, horizon=1, frequency="quarterly")
+    assert np.isnan(m.icir)
 
 
 def test_forward_return_shift_is_in_periods_at_frequency() -> None:
