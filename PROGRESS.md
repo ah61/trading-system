@@ -12,9 +12,9 @@
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
 | **Active milestone** | 5.7 done (DD-010 shipped); 5.8 done; equity universe expansion (5.10) is next priority |
-| **Tests** | 229 passing (203 → +26 in DD-010: 5 panels + 14 signal_instruments + 7 misc) |
-| **Smoke test** | `scripts/evaluate_signals.py --no-report` succeeds at HEAD (commit `66f969e`); 229 tests passing |
-| **Next action** | Resume Milestone 5.9 plan: Part 1 — add `frequency='quarterly'` to `SignalEvaluator` (scoped 3-line config + parallel tests). Part 2 — FX Carry quarterly horizon experiment via `scripts/exploratory/`. See "Publication-lag diagnostic (2026-05-18)" below for the diagnostic finding that unblocked this. |
+| **Tests** | 234 passing (229 + 5 from Part 1 of 5.9 quarterly evaluator support) |
+| **Smoke test** | `scripts/evaluate_signals.py --no-report` succeeds at HEAD (commit `7100d37`); 234 tests passing; byte-identical to pre-quarterly numerics on existing frequencies |
+| **Next action** | Milestone 5.9 Part 2 — write `scripts/exploratory/fx_carry_horizons.py` running FX Carry side-by-side at monthly horizons `[1,2,3,6,9,12]` and quarterly horizons `[1,2,4]`. Output via `OutputManager.new_exploratory()`. Part 1 (quarterly evaluator support) shipped 2026-05-18 as commit `7100d37`. ARCHITECTURE.md §4.3 doc update queued for batch with Part 2 docs commit. |
 
 ---
 
@@ -498,6 +498,48 @@ Horizon  IC      ICIR    Hit     Sharpe  N
   are consistent with the post-5.5 results recorded earlier in this
   document (IC near zero, ICIR effectively zero), confirming the
   underlying signal-quality finding survives the refactor.
+
+### Milestone 5.9 Part 1 — Quarterly frequency support in SignalEvaluator ✅
+
+**Completed 2026-05-18 (commit `7100d37`).**
+
+Generic capability extension: added `'quarterly'` to the evaluator's
+frequency machinery. No signal class declares `frequency='quarterly'`
+yet; 5.9 Part 2 (FX Carry quarterly horizon experiment) will be the
+first consumer.
+
+Changes:
+- [x] `src/evaluation/signal_evaluator.py`:
+  - `Frequency = Literal[..., "quarterly"]`
+  - `_FREQUENCY_TABLE["quarterly"] = (4, "QS")` — quarter-start convention,
+    matching `"MS"` for monthly
+  - `_ROLLING_IC_WINDOW["quarterly"] = 1` — degenerate by design
+    (1 period ≈ one quarter; ICIR is NaN at quarterly grain, codified
+    as a contract test, not a bug)
+  - Docstring updates in `SignalMetrics` and `evaluate()` to reflect the
+    expanded frequency set
+- [x] `tests/test_evaluation.py`: 5 new tests covering accepts-quarterly,
+      signal resample first-nonzero, log-returns resample sums, Sharpe
+      annualisation (sqrt(4)), and `test_quarterly_icir_is_nan_by_design`
+      (contract test locking in the design decision)
+- [x] New helper `_build_quarterly_signal_daily_indexed()` parallels the
+      monthly helper
+- [x] **Byte-identical numerics on daily/weekly/monthly paths** verified
+      via canonical runner re-run (all 12 metric rows × 5 fields = 60
+      values unchanged)
+- [x] Tests: 229 → 234 passing
+
+**Diagnostic that preceded this:** Before this work, a publication-lag
+diagnostic spike (`scripts/exploratory/fx_carry_publication_lag_spike.py`,
+commit `66f969e`) verified that the catalogue's monthly→daily forward-fill
+lookahead bug does not materially move FX Carry's IC. That finding is
+filed under Active Issues as a Phase 6 prerequisite, freeing 5.9 to
+proceed on the existing infrastructure. See "Catalogue forward-fill does
+not account for FRED publication lag" in Active Issues.
+
+**Doc updates queued for next session (batched with Part 2):**
+- ARCHITECTURE.md §4.3 — add `'quarterly'` to evaluator's supported
+  frequency set (currently lists daily/weekly/monthly only)
 
 ---
 
