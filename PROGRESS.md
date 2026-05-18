@@ -1,7 +1,7 @@
 # PROGRESS.md
 # Build Log and Current Status
 
-**Last Updated:** 2026-05-16
+**Last Updated:** 2026-05-18
 **Tracks ROADMAP.md version:** 0.4
 
 ---
@@ -521,17 +521,6 @@ Phase 7.2 Treasury futures work.
 
 ### Active issues (open)
 
-- **Equity Momentum CatalogError on first-business-day-of-year edge** (new,
-  2026-05-16). Surfaced during DD-010 smoke testing: requesting
-  `AAPL_CLOSE` for `start=2010-01-01, end=2024-12-31` raises CatalogError
-  because the underlying daily series begins 2010-01-04 (first trading
-  day of 2010). The error was masked on subsequent runs by the cache.
-  Root cause: catalogue range validation is strict to the calendar start
-  date, not the first business day in the range. Will resurface on any
-  forced refresh or fresh-cache run. Fix candidates: (a) relax range
-  validation to use first available date if it falls within N business
-  days of the request start; (b) snap request starts to the first
-  available business day silently. Decide before next universe refresh.
 - **FX pair labels do not follow market convention.** From Milestone 5.5
   onward, FX Carry produces mechanical pair labels of the form
   `<non-USD>/USD` for all pairs (e.g. `JPY/USD`, `CAD/USD`, `CHF/USD`).
@@ -586,6 +575,14 @@ Phase 7.2 Treasury futures work.
 - ✅ **Two sources of truth for "what does signal X trade"** (resolved
   by DD-010 — `Signal.instruments` and `signal.instrument_prices()` are
   now the only place).
+- ✅ **Equity Momentum CatalogError on first-business-day-of-year edge**
+  (unverified; did not reproduce at HEAD `08c6356`, 2026-05-18). Entry
+  was recorded in the DD-010 session from a Cursor summary string rather
+  than a verified traceback. Both `force_refresh=True` from 2010-01-01
+  and a no-refresh fetch from 2009-06-01 returned `AAPL_CLOSE` cleanly.
+  Either the original report misread the failure mode, or an intervening
+  commit (likely `aec369d`) resolved it. Kept for audit trail per
+  CONVENTIONS §10 (verification beats review).
 
 ### Documentation
 - `ARCHITECTURE.md` was bumped to v0.2 on 2026-05-14: renamed prior
