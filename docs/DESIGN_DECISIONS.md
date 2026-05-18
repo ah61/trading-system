@@ -1,8 +1,8 @@
 # DESIGN_DECISIONS.md
 # Design Rationale and Open Questions
 
-**Version:** 0.3
-**Last Updated:** 2026-05-16
+**Version:** 0.4
+**Last Updated:** 2026-05-18
 **Status:** Living document — append decisions, do not rewrite history.
 
 ---
@@ -617,6 +617,104 @@ ceremonial.
 - The canonical verification command may need to grow as the system
   grows (e.g. once paper trading is wired up, a "smoke broker connection"
   step may join the canonical command). Revisit at end of each phase.
+
+---
+
+## DD-013 — ICIR semantics differ by evaluation path
+**Date:** 2026-05-18
+**Status:** Decided (no code change; documentation + test-coverage follow-up)
+
+### Context
+Milestone 5.9 Part 1 added quarterly support to `SignalEvaluator` and
+codified — via `test_quarterly_icir_is_nan_by_design` — that ICIR at
+quarterly frequency is NaN. That contract was established against
+synthetic single-asset signals (flat `DatetimeIndex`), which is what the
+test uses.
+
+5.9 Part 2 ran the first real evaluation that exercises quarterly on a
+cross-sectional signal (FX Carry, `MultiIndex(date, pair)`). It produced
+**finite** ICIR values at quarterly horizons (-0.0548 / -0.0696 / -0.1159
+for h=1/2/4q). This contradicted the prompt's stated expectation and was
+surfaced by Cursor rather than papered over.
+
+Reading the evaluator source confirmed why. There are two distinct paths
+that compute ICIR with different formulas, not just different inputs:
+
+- **Single-asset path** (`_evaluate_single_asset`, L318+):
+  - `ic_mean` = one-shot Spearman correlation across the entire window.
+  - `ic_std` = std of a *rolling* Spearman correlation, window length =
+    `_ROLLING_IC_WINDOW[frequency]`.
+  - At quarterly, window = 1 → rolling correlation is undefined at every
+    point → `ic_std` is NaN → `icir` is NaN. This is what the test locks
+    in, and that test is correct for the path it covers.
+
+- **Cross-sectional path** (inline in `evaluate`, L517+):
+  - `ic` = a Series of per-date cross-sectional Spearman correlations
+    (signal across pairs vs forward returns across pairs, at each date),
+    via `_ic_by_date`.
+  - `ic_mean` = `nanmean(ic)`; `ic_std` = `nanstd(ic, ddof=1)`. Both
+    moments taken over the same `ic` series.
+  - `_ROLLING_IC_WINDOW` is never read on this path.
+  - At quarterly, `ic` has ~60 entries over 2010-2024 — plenty for a
+    finite std and a finite ICIR.
+
+The contract written in 5.9 Part 1 was therefore scoped only as wide as
+the path it was demonstrated on. The cross-sectional path was not
+considered in writing the contract; we missed it.
+
+### Decision
+1. Both paths' current behavior is **correct as implemented** for the
+   statistic each represents. They are intentionally different
+   statistics: rolling-time-series IC versus per-date cross-sectional
+   IC. They should not be unified into a single computation.
+2. The `test_quarterly_icir_is_nan_by_design` test stays as is. It
+   correctly documents the single-asset path's quarterly behavior.
+3. Document the path-specific semantics here (this DD) and in the
+   evaluator docstring at the next opportunity that touches `evaluate`.
+4. Add a cross-sectional counterpart test that locks in finite ICIR at
+   quarterly grain for `MultiIndex` signals — see open items.
+
+### Rationale
+The two ICIR formulas measure different things and both are useful:
+
+- Single-asset rolling IC asks "does this signal's predictive power
+  persist *across time* at this frequency?" The rolling window matters
+  because the question is fundamentally about temporal stability of one
+  series' relationship to its own forwards.
+- Cross-sectional per-date IC asks "at each date, does the signal rank
+  the cross-section correctly?" There is no rolling window; the unit of
+  observation is "one date's cross-sectional pattern," and ICIR is the
+  signal-to-noise ratio of that pattern over time.
+
+Forcing both into the same formula would make one of the two answer the
+wrong question. We keep them separate.
+
+The error here was not in the code; it was in writing a contract whose
+name (`test_quarterly_icir_is_nan_by_design`) and prose framing implied
+a property of the *frequency* when it is actually a property of the IC
+*computation* on the single-asset path. This DD exists so a future
+reader who finds finite quarterly ICIR on a cross-sectional signal does
+not chase it as a bug.
+
+### Open items
+- **No contract test for cross-sectional quarterly ICIR.** The single-
+  asset path has `test_quarterly_icir_is_nan_by_design`; the cross-
+  sectional path has no equivalent locking in finite-ICIR-at-quarterly
+  behavior. A future small refactor that breaks `_ic_by_date` or
+  shadows the cross-sectional branch with the single-asset one would
+  not be caught. Add `test_quarterly_icir_finite_for_cross_sectional`
+  with a synthetic `MultiIndex` fixture in a follow-up.
+- **Formula asymmetry across paths.** Beyond the cross-sectional vs
+  single-asset distinction, the two paths use mildly different ICIR
+  formulas even on shared inputs: single-asset uses
+  `ic_mean = one-shot full-sample correlation` paired with
+  `ic_std = std(rolling correlations)`, while cross-sectional uses
+  `mean` and `std` of the same per-date series. Most academic references
+  define ICIR as `mean(IC_series) / std(IC_series)` with both moments
+  on the same series (the cross-sectional shape). Whether to harmonise
+  is a separate question — flagging it as an open question, not a
+  decision today. Likely revisited as part of methodology hardening in
+  Phase 6 or later.
 
 ---
 
