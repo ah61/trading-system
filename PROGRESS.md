@@ -11,10 +11,10 @@
 | Field | Value |
 |---|---|
 | **Roadmap phase** | Phase 5 — Signal Hardening |
-| **Active milestone** | 5.7 done (DD-010 shipped); 5.8 done; equity universe expansion (5.10) is next priority |
+| **Active milestone** | 5.9 Part 2 done (FX Carry horizon-grid experiment, commits `acd60e1` script and `8a93277` DD-013); equity universe expansion (5.10) is next priority |
 | **Tests** | 234 passing (229 + 5 from Part 1 of 5.9 quarterly evaluator support) |
-| **Smoke test** | `scripts/evaluate_signals.py --no-report` succeeds at HEAD (commit `7100d37`); 234 tests passing; byte-identical to pre-quarterly numerics on existing frequencies |
-| **Next action** | Milestone 5.9 Part 2 — write `scripts/exploratory/fx_carry_horizons.py` running FX Carry side-by-side at monthly horizons `[1,2,3,6,9,12]` and quarterly horizons `[1,2,4]`. Output via `OutputManager.new_exploratory()`. Part 1 (quarterly evaluator support) shipped 2026-05-18 as commit `7100d37`. ARCHITECTURE.md §4.3 doc update queued for batch with Part 2 docs commit. |
+| **Smoke test** | `scripts/evaluate_signals.py --no-report` succeeds at HEAD (commit `acd60e1`); 234 tests passing; byte-identical to pre-quarterly numerics on existing frequencies |
+| **Next action** | Milestone 5.10 — universe expansion (FX EM, equities sector-balanced 55, rates +TIP/LQD). See ROADMAP §5.10 and DESIGN_DECISIONS DD-002. |
 
 ---
 
@@ -537,9 +537,109 @@ filed under Active Issues as a Phase 6 prerequisite, freeing 5.9 to
 proceed on the existing infrastructure. See "Catalogue forward-fill does
 not account for FRED publication lag" in Active Issues.
 
-**Doc updates queued for next session (batched with Part 2):**
-- ARCHITECTURE.md §4.3 — add `'quarterly'` to evaluator's supported
-  frequency set (currently lists daily/weekly/monthly only)
+**Doc updates shipped with Part 2:**
+- ARCHITECTURE.md §4.3 — `'quarterly'` added to evaluator's supported
+  frequency set; annualisation enumeration updated to 252 / 52 / 12 / 4
+  for daily / weekly / monthly / quarterly
+- DESIGN_DECISIONS.md DD-013 — ICIR semantics differ by evaluation path
+  (cross-sectional vs single-asset), discovered during Part 2
+
+---
+
+### Milestone 5.9 Part 2 — FX Carry quarterly horizon experiment ✅
+
+**Completed 2026-05-18 (commit `acd60e1`).**
+
+One-off exploratory script (`scripts/exploratory/fx_carry_horizons.py`)
+evaluating FX Carry side-by-side across an extended monthly horizon
+grid and a quarterly grid. Goal: test the OQ-001 hypothesis that
+FX Carry's near-zero IC at monthly horizons might be a horizon
+mismatch — does the signal work over longer holding periods?
+
+**Configuration:**
+- Window: 2010-01-01 to 2024-12-31
+- Monthly horizons: `[1, 2, 3, 6, 9, 12]` at `frequency='monthly'`
+- Quarterly horizons: `[1, 2, 4]` at `frequency='quarterly'`
+- Inputs fetched once at daily frequency through the catalogue;
+  evaluator resamples internally
+
+**Results (monthly grid):**
+
+| Horizon | IC | ICIR | Hit Rate | Sharpe | N |
+|---------|---|---|---|---|---|
+| 1m | -0.0017 | -0.0031 | 0.4991 | -0.0870 | 1086 |
+| 2m | -0.0031 | -0.0055 | 0.5014 | -0.0802 | 1079 |
+| 3m | -0.0097 | -0.0176 | 0.5009 | -0.1208 | 1072 |
+| 6m | -0.0079 | -0.0140 | 0.4995 | -0.0924 | 1051 |
+| 9m | -0.0166 | -0.0295 | 0.4981 | -0.1797 | 1030 |
+| 12m | -0.0045 | -0.0079 | 0.4995 | -0.1339 | 1009 |
+
+Monthly h=[1,2,3,6] reproduces the canonical block byte-for-byte
+(sanity-check vs `evaluate_signals.py` on HEAD `97fb133`).
+
+**Results (quarterly grid):**
+
+| Horizon | IC | ICIR | Hit Rate | Sharpe | N |
+|---------|---|---|---|---|---|
+| 1q | -0.0266 | -0.0548 | 0.5198 | -0.0252 | 354 |
+| 2q | -0.0341 | -0.0696 | 0.5159 | -0.1422 | 347 |
+| 4q | -0.0584 | -0.1159 | 0.5195 | -0.1404 | 333 |
+
+**Verdict: horizon is not the issue.** The hypothesis was that the
+signal might work at longer holding periods. The data does not
+support this:
+
+- Monthly IC is uniformly weak-negative across the full grid (1m–12m).
+  No horizon discovers carry; absolute IC stays below 0.02 everywhere.
+- Quarterly IC is *more* negative than monthly (-0.027 to -0.058 vs
+  -0.002 to -0.017), not more positive. ICIRs are larger in absolute
+  terms at quarterly but the sign is still wrong.
+- Quarterly Hit Rate ticks up to 0.52 (vs ~0.50 monthly) — the only
+  faintly positive signal. The gap between negative-IC and
+  above-50%-Hit means the *direction* of cross-sectional carry rank
+  is slightly right at quarterly grain but the *magnitude* of the
+  rank is uncorrelated with magnitude of returns. Likely noise given
+  only ~333-354 quarterly observations.
+- No horizon "wins" in either grid. Best monthly is h=1m by absolute
+  IC (essentially zero). Best quarterly is h=1q (-0.027, marginally
+  less negative). Neither would survive a DSR test.
+
+**Going-forward decision:** Monthly stays as FX Carry's evaluation
+frequency. Quarterly is supported infrastructurally but produces no
+better result on this signal. The hypothesis closes cleanly — a useful
+negative finding that eliminates one candidate explanation for FX
+Carry's near-zero IC.
+
+**Implications for next milestones:**
+- **5.10 (universe expansion):** Worth doing. If the issue is "G10-only
+  carries no information post-2010 because everyone arbitrages it,"
+  adding EM FX may move the needle (DD-002).
+- **5.13 (forward-spot basis carry):** Most likely candidate to actually
+  find a signal. Current evaluation uses rate differentials as a proxy
+  for carry; basis-carry uses actual forward points. Post-2008 CIP
+  deviations are themselves a documented return source. If the
+  proxy is wrong, basis-carry could swing IC. Part 2 makes 5.13 *more*
+  interesting, not less.
+- **5.14 (vol conditioning):** Still worth testing on its own merits.
+
+**Design discoveries surfaced by this work:**
+- DD-013 (ICIR semantics differ by evaluation path). 5.9 Part 1's
+  `_ROLLING_IC_WINDOW['quarterly']=1` contract was scoped only as
+  wide as the single-asset path. FX Carry is cross-sectional and
+  uses a different IC computation that does not consult
+  `_ROLLING_IC_WINDOW` at all — its quarterly ICIR is finite, not
+  NaN. Both behaviours are intentional; see DD-013 for full
+  reasoning and open items (notably, no cross-sectional counterpart
+  to `test_quarterly_icir_is_nan_by_design` exists yet).
+
+**Out of scope, flagged:**
+- Cross-sectional quarterly ICIR has no contract test. Add
+  `test_quarterly_icir_finite_for_cross_sectional` in a follow-up.
+- ICIR formula asymmetry between paths: single-asset uses
+  `one-shot mean(IC) / std(rolling IC)`; cross-sectional uses
+  `mean(per-date IC) / std(per-date IC)`. Both are real statistics
+  but they're not the same formula. Likely revisited as part of
+  methodology hardening in Phase 6+.
 
 ---
 

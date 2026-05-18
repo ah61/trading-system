@@ -2,7 +2,7 @@
 # Systematic Multi-Asset Trading System
 
 **Version:** 0.4
-**Last Updated:** 2026-05-16
+**Last Updated:** 2026-05-18
 **Status:** Phases 0–4 implemented; Phase 5 (Signal Hardening) in progress
 through DD-010 (commit `ff92ff4` + fix `b1e0ab3`).
 
@@ -480,21 +480,23 @@ class SignalMetrics:
     decay_halflife: int     # Periods for IC to decay to 50% — determines rebalance freq
     n_observations: int
     forward_return_horizon: int  # In periods of `frequency` (see below)
-    frequency: str          # 'daily' | 'weekly' | 'monthly'
+    frequency: str          # 'daily' | 'weekly' | 'monthly' | 'quarterly'
 ```
 
 **Evaluation horizons:** Each signal class declares its own
 `evaluation_horizons` (DD-010): 1, 5, 21, 63 days for daily signals;
 1, 2, 3, 6 months for monthly signals.
 
-**Frequency layer (Milestone 5.2):** `SignalEvaluator.evaluate(...,
-frequency=...)` resamples both signal and returns to the chosen
-frequency before evaluation. The signal is resampled by taking the
-first non-zero value per period (carrying forward for all-zero
-periods); log returns are summed over each period (compounding under
-the log convention, CONVENTIONS.md §3.2). The forward-return shift
-`shift(-(horizon + 1))` is applied in periods of the chosen frequency.
-Annualisation of Sharpe uses 252 / 52 / 12 for daily / weekly / monthly.
+**Frequency layer (Milestone 5.2, extended in 5.9 Part 1):**
+`SignalEvaluator.evaluate(..., frequency=...)` resamples both signal and
+returns to the chosen frequency before evaluation. Supported values are
+`'daily'`, `'weekly'`, `'monthly'`, and `'quarterly'`. The signal is
+resampled by taking the first non-zero value per period (carrying
+forward for all-zero periods); log returns are summed over each period
+(compounding under the log convention, CONVENTIONS.md §3.2). The
+forward-return shift `shift(-(horizon + 1))` is applied in periods of
+the chosen frequency. Annualisation of Sharpe uses 252 / 52 / 12 / 4
+for daily / weekly / monthly / quarterly.
 
 ### 4.4 SignalCorrector
 
