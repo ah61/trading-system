@@ -13,8 +13,8 @@
 | **Roadmap phase** | Phase 5 — Signal Hardening |
 | **Active milestone** | 5.7 done (DD-010 shipped); 5.8 done; equity universe expansion (5.10) is next priority |
 | **Tests** | 229 passing (203 → +26 in DD-010: 5 panels + 14 signal_instruments + 7 misc) |
-| **Smoke test** | `scripts/evaluate_signals.py --no-report` succeeds at HEAD (commit `ff92ff4` + fix `b1e0ab3`); see "Phase 5 — 5.7 (DD-010) completion" below for output |
-| **Next action** | Resolve Equity Momentum CatalogError (Known Issues), then proceed with universe expansion or 5.9 quarterly-horizon experiment |
+| **Smoke test** | `scripts/evaluate_signals.py --no-report` succeeds at HEAD (commit `66f969e`); 229 tests passing |
+| **Next action** | Resume Milestone 5.9 plan: Part 1 — add `frequency='quarterly'` to `SignalEvaluator` (scoped 3-line config + parallel tests). Part 2 — FX Carry quarterly horizon experiment via `scripts/exploratory/`. See "Publication-lag diagnostic (2026-05-18)" below for the diagnostic finding that unblocked this. |
 
 ---
 
@@ -521,6 +521,39 @@ Phase 7.2 Treasury futures work.
 
 ### Active issues (open)
 
+- **Catalogue forward-fill does not account for FRED publication lag**
+  (Phase 6 prerequisite, 2026-05-18). `VariableCatalog._resample()`
+  forward-fills monthly FRED series onto a daily index anchored at the
+  series' **label date** (e.g. 2026-03-01 for March data), not the
+  **publication date** (~mid-April for that print). Any daily signal
+  reading monthly FRED data before its publication date is using
+  unknowable information — lookahead bias by ~30 business days.
+  `_PUBLICATION_LAG_DAYS` in `src/data/cached_source.py` exists but is
+  only wired into cache-coverage slack checks, not into the data-flow
+  path. DD-004's "knowable at time t" principle is under-specified by
+  the current implementation. Diagnostic spike
+  (`scripts/exploratory/fx_carry_publication_lag_spike.py`, commit
+  `66f969e`) tested FX Carry with monthly G10 rates shifted +30 BD
+  in-process. Result: **non-material impact on FX Carry IC/ICIR
+  magnitudes; signs unchanged on all horizons; N drops by ~7 monthly
+  observations from boundary clipping.**
+
+  | Horizon | Baseline IC | Lagged IC | ΔIC | Baseline ICIR | Lagged ICIR |
+  |---|---|---|---|---|---|
+  | 1m | -0.0017 | -0.0031 | 0.0014 | -0.0031 | -0.0055 |
+  | 2m | -0.0031 | -0.0097 | 0.0067 | -0.0055 | -0.0176 |
+  | 3m | -0.0097 | -0.0027 | 0.0070 | -0.0176 | -0.0048 |
+  | 6m | -0.0079 | -0.0085 | 0.0012 | -0.0140 | -0.0152 |
+
+  **Implication for current work:** FX Carry's near-zero IC finding
+  stands; the lookahead does not rescue or invert the signal. The bug
+  is real but its current impact on Stage 1 results is small because
+  rate ranks change slowly. **Future signals (macro surprises, value
+  signals, anything reading FRED data daily) will be much more
+  sensitive.** Fix design: per-variable `publication_lag_days` declared
+  in catalogue specs, applied in `VariableCatalog._resample()` before
+  forward-fill. ALFRED vintage reserved for materially-revised series
+  (CPI, payrolls). See proposed DD-012.
 - **FX pair labels do not follow market convention.** From Milestone 5.5
   onward, FX Carry produces mechanical pair labels of the form
   `<non-USD>/USD` for all pairs (e.g. `JPY/USD`, `CAD/USD`, `CHF/USD`).
